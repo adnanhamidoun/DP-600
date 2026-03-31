@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "rewrites": [
+    {
+      "source": "/((?!assets/|questions-final.json|favicon.ico|vite.svg).*)",
+      "destination": "/index.html"
+    }
+  ]
+}
