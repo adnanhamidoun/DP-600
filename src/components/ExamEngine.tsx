@@ -1,16 +1,23 @@
-import React, { useState } from "react";
-import { Question } from "../types";
+import React, { useEffect, useState } from "react";
+import { Question, Scenario, SCENARIO_PREAMBLE } from "../types";
 import {
   OrderingQuestion,
   DragDropQuestion,
   DropdownQuestion,
 } from "./QuestionTypes";
 import { HotspotExam } from "./HotspotExam";
+import { HotspotFeedbackVisualizer } from "./HotspotFeedbackVisualizer";
 import { storageUtils } from "../utils/storage";
+import { FormattedText } from "./FormattedText";
 
 interface ExamEngineProps {
   questions: Question[];
-  mode?: "normal" | "training";
+  scenarios?: Scenario[];
+  mode?: "normal" | "training" | "microsoft";
+  shuffleQuestions?: boolean;
+  shuffleOptions?: boolean;
+  initialIndex?: number;
+  initialAnswers?: Record<string, unknown>;
   onComplete: (results: ExamResults) => void;
   onCancel: () => void;
 }
@@ -21,20 +28,157 @@ export interface ExamResults {
   failedQuestions: Question[];
   answers: Record<string, unknown>;
   score: number;
+  scaledScore: number;
+  passed: boolean;
   earnedPoints: number;
   totalPoints: number;
+  breakdownByType: Array<{
+    type: Question["type"];
+    total: number;
+    earned: number;
+    percentage: number;
+  }>;
 }
 
 export const ExamEngine: React.FC<ExamEngineProps> = ({
   questions,
+  scenarios = [],
   mode = "normal",
+  shuffleQuestions = true,
+  shuffleOptions = true,
+  initialIndex = 0,
+  initialAnswers = {},
   onComplete,
   onCancel,
 }) => {
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [answers, setAnswers] = useState<Record<string, unknown>>({});
+  const MICROSOFT_EXAM_DURATION_SECONDS = 120 * 60;
 
-  if (questions.length === 0) {
+  const shuffleArray = <T,>(list: T[]): T[] => {
+    const copy = [...list];
+    for (let i = copy.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [copy[i], copy[j]] = [copy[j], copy[i]];
+    }
+    return copy;
+  };
+
+  const prepareQuestionsForSession = (
+    inputQuestions: Question[],
+  ): Question[] => {
+    const withPreparedOptions = inputQuestions.map((question) => {
+      if (
+        shuffleOptions &&
+        (question.type === "single" ||
+          question.type === "multiple" ||
+          question.type === "dropdown") &&
+        question.options
+      ) {
+        return {
+          ...question,
+          options: shuffleArray(question.options),
+        };
+      }
+
+      // Shuffle drag-drop items to avoid memorizing positions
+      if (
+        shuffleOptions &&
+        question.type === "dragdrop" &&
+        question.dragDropItems
+      ) {
+        return {
+          ...question,
+          dragDropItems: shuffleArray(question.dragDropItems),
+        };
+      }
+
+      // Hotspot and other fixed-layout types keep their original internal order.
+      return question;
+    });
+
+    return shuffleQuestions
+      ? shuffleArray(withPreparedOptions)
+      : withPreparedOptions;
+  };
+
+  const [sessionQuestions, setSessionQuestions] = useState<Question[]>(() =>
+    prepareQuestionsForSession(questions),
+  );
+  const [currentIndex, setCurrentIndex] = useState(initialIndex);
+  const [answers, setAnswers] =
+    useState<Record<string, unknown>>(initialAnswers);
+  const [timeLeftSeconds, setTimeLeftSeconds] = useState<number | null>(null);
+  const [timeoutSubmitted, setTimeoutSubmitted] = useState(false);
+  const [showingTrainingFeedback, setShowingTrainingFeedback] = useState(false);
+
+  const isTrainingMode = mode === "training";
+  const isMicrosoftMode = mode === "microsoft";
+
+  const formatTime = (totalSeconds: number) => {
+    const safe = Math.max(0, totalSeconds);
+    const hours = Math.floor(safe / 3600)
+      .toString()
+      .padStart(2, "0");
+    const minutes = Math.floor((safe % 3600) / 60)
+      .toString()
+      .padStart(2, "0");
+    const seconds = (safe % 60).toString().padStart(2, "0");
+    return `${hours}:${minutes}:${seconds}`;
+  };
+
+  useEffect(() => {
+    setSessionQuestions(prepareQuestionsForSession(questions));
+    setCurrentIndex(0);
+    setAnswers({});
+    setTimeoutSubmitted(false);
+    setShowingTrainingFeedback(false);
+  }, [questions, shuffleQuestions, shuffleOptions]);
+
+  useEffect(() => {
+    if (isMicrosoftMode) {
+      setTimeLeftSeconds(MICROSOFT_EXAM_DURATION_SECONDS);
+      setTimeoutSubmitted(false);
+    } else {
+      setTimeLeftSeconds(null);
+      setTimeoutSubmitted(false);
+    }
+  }, [isMicrosoftMode, sessionQuestions.length]);
+
+  useEffect(() => {
+    if (!isMicrosoftMode || timeLeftSeconds === null || timeLeftSeconds <= 0) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      setTimeLeftSeconds((prev) => {
+        if (prev === null) return prev;
+        return Math.max(0, prev - 1);
+      });
+    }, 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, [isMicrosoftMode, timeLeftSeconds]);
+
+  // Auto-save training state with throttle (max every 5 seconds)
+  useEffect(() => {
+    if (!isTrainingMode) return;
+
+    const timeoutId = window.setTimeout(() => {
+      try {
+        storageUtils.saveTrainingState({
+          questionsIds: sessionQuestions.map((q) => q.id),
+          currentIndex,
+          answers,
+          timestamp: Date.now(),
+        });
+      } catch (err) {
+        console.error("Failed to save training state:", err);
+      }
+    }, 5000); // Save every 5 seconds
+
+    return () => window.clearTimeout(timeoutId);
+  }, [isTrainingMode, currentIndex, answers, sessionQuestions]);
+
+  if (sessionQuestions.length === 0) {
     return (
       <div className="app-shell flex items-center justify-center p-6">
         <div className="glass-panel p-8 text-center max-w-lg w-full">
@@ -50,28 +194,28 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
     );
   }
 
-  const currentQuestion = questions[currentIndex];
-  const isLastQuestion = currentIndex === questions.length - 1;
-  const isTrainingMode = mode === "training";
+  const currentQuestion = sessionQuestions[currentIndex];
+  const isLastQuestion = currentIndex === sessionQuestions.length - 1;
 
-  const getPartialScore = (correctIds: string[], selectedIds: string[]) => {
+  const getStrictPartialScore = (
+    correctIds: string[],
+    selectedIds: string[],
+  ) => {
     if (correctIds.length === 0) return 0;
+
     const correctSet = new Set(correctIds);
     const selectedSet = new Set(selectedIds);
-    let correctSelections = 0;
-    let incorrectSelections = 0;
 
-    selectedSet.forEach((id) => {
-      if (correctSet.has(id)) {
-        correctSelections++;
-      } else {
-        incorrectSelections++;
-      }
-    });
+    // Invalid attempt: selecting more answers than allowed yields zero.
+    if (selectedSet.size > correctSet.size) {
+      return 0;
+    }
 
-    const rawScore =
-      (correctSelections - incorrectSelections) / correctIds.length;
-    return Math.max(0, Math.min(1, rawScore));
+    const correctSelections = Array.from(selectedSet).filter((id) =>
+      correctSet.has(id),
+    ).length;
+
+    return correctSelections / correctSet.size;
   };
 
   const calculateQuestionPoints = (question: Question, userAnswer: unknown) => {
@@ -98,7 +242,7 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
       const selectedIds = Array.isArray(userAnswer)
         ? (userAnswer as string[])
         : [];
-      return getPartialScore(correctIds, selectedIds);
+      return getStrictPartialScore(correctIds, selectedIds);
     }
 
     if (question.type === "ordering") {
@@ -113,30 +257,36 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
       const requiredItems = items.filter((item) => !!item.correctBucket);
       const distractorItems = items.filter((item) => !item.correctBucket);
 
-      const correctPlacements = requiredItems.filter(
-        (item) => userAssignments[item.id] === item.correctBucket,
-      ).length;
-      const incorrectRequiredPlacements = requiredItems.filter(
+      if (requiredItems.length === 0) return 0;
+
+      const hasIncorrectPlacement = requiredItems.some(
         (item) =>
           userAssignments[item.id] !== undefined &&
           userAssignments[item.id] !== item.correctBucket,
-      ).length;
-      const usedDistractors = distractorItems.filter(
+      );
+      if (hasIncorrectPlacement) {
+        return 0;
+      }
+
+      const hasUsedDistractor = distractorItems.some(
         (item) => userAssignments[item.id] !== undefined,
+      );
+      if (hasUsedDistractor) {
+        return 0;
+      }
+
+      const correctPlacements = requiredItems.filter(
+        (item) => userAssignments[item.id] === item.correctBucket,
       ).length;
 
-      const denominator = Math.max(requiredItems.length, 1);
-      const rawScore =
-        (correctPlacements - incorrectRequiredPlacements - usedDistractors) /
-        denominator;
-      return Math.max(0, Math.min(1, rawScore));
+      return correctPlacements / requiredItems.length;
     }
 
     if (question.type === "hotspot") {
       const selectedIds = (userAnswer as string[]) || [];
       const correctIds =
         question.hotspotAreas?.filter((a) => a.correct).map((a) => a.id) || [];
-      return getPartialScore(correctIds, selectedIds);
+      return getStrictPartialScore(correctIds, selectedIds);
     }
 
     if (question.type === "casestudy") {
@@ -232,6 +382,19 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
     return "No definida";
   };
 
+  const getDragDropSolvedAssignments = (question: Question) => {
+    if (question.type !== "dragdrop") return {};
+    return (question.dragDropItems || []).reduce<Record<string, string>>(
+      (acc, item) => {
+        if (item.correctBucket) {
+          acc[item.id] = item.correctBucket;
+        }
+        return acc;
+      },
+      {},
+    );
+  };
+
   const currentUserAnswer = answers[currentQuestion.id];
   const currentHasAnswer = hasAnswer(currentQuestion, currentUserAnswer);
   const currentPoints = calculateQuestionPoints(
@@ -245,6 +408,11 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
     ? storageUtils
         .getCaseStudies()
         .find((c) => c.id === currentQuestion.caseStudyId)
+    : null;
+
+  // Obtener el scenario si la pregunta pertenece a uno
+  const scenario = currentQuestion.scenarioId
+    ? scenarios.find((s) => s.id === currentQuestion.scenarioId)
     : null;
 
   const handleSingleSelect = (optionId: string) => {
@@ -293,13 +461,52 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
 
   const handleNext = () => {
     if (!isLastQuestion) {
-      setCurrentIndex((prev) => prev + 1);
+      if (isTrainingMode) {
+        // En modo entrenamiento, primero mostrar feedback si no está mostrando
+        if (!showingTrainingFeedback && currentHasAnswer) {
+          setShowingTrainingFeedback(true);
+        } else {
+          // Luego avanzar a la siguiente pregunta
+          const nextIndex = currentIndex + 1;
+          setCurrentIndex(nextIndex);
+          setShowingTrainingFeedback(false);
+          // Save immediately on question change
+          try {
+            storageUtils.saveTrainingState({
+              questionsIds: sessionQuestions.map((q) => q.id),
+              currentIndex: nextIndex,
+              answers,
+              timestamp: Date.now(),
+            });
+          } catch (err) {
+            console.error("Failed to save training state:", err);
+          }
+        }
+      } else {
+        // En otros modos, avanzar directamente
+        setCurrentIndex((prev) => prev + 1);
+      }
     }
   };
 
   const handlePrevious = () => {
     if (currentIndex > 0) {
-      setCurrentIndex((prev) => prev - 1);
+      const prevIndex = currentIndex - 1;
+      setCurrentIndex(prevIndex);
+      setShowingTrainingFeedback(false);
+      // Save immediately on question change
+      if (isTrainingMode) {
+        try {
+          storageUtils.saveTrainingState({
+            questionsIds: sessionQuestions.map((q) => q.id),
+            currentIndex: prevIndex,
+            answers,
+            timestamp: Date.now(),
+          });
+        } catch (err) {
+          console.error("Failed to save training state:", err);
+        }
+      }
     }
   };
 
@@ -308,13 +515,26 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
     let correctCount = 0;
     let earnedPoints = 0;
     let totalPoints = 0;
+    const typeTotals = new Map<
+      Question["type"],
+      { total: number; earned: number }
+    >();
 
-    questions.forEach((question) => {
+    sessionQuestions.forEach((question) => {
       const userAnswer = answers[question.id];
       const points = calculateQuestionPoints(question, userAnswer);
 
       totalPoints += 1;
       earnedPoints += points;
+
+      const currentType = typeTotals.get(question.type) || {
+        total: 0,
+        earned: 0,
+      };
+      currentType.total += 1;
+      currentType.earned += points;
+      typeTotals.set(question.type, currentType);
+
       const isCorrect = points === 1;
 
       if (!isCorrect) {
@@ -324,37 +544,85 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
       }
     });
 
+    const percentageScore =
+      totalPoints > 0 ? Math.round((earnedPoints / totalPoints) * 100) : 0;
+    const scaledScore =
+      totalPoints > 0 ? Math.round((earnedPoints / totalPoints) * 1000) : 0;
+    const breakdownByType = Array.from(typeTotals.entries()).map(
+      ([type, values]) => ({
+        type,
+        total: values.total,
+        earned: values.earned,
+        percentage:
+          values.total > 0
+            ? Math.round((values.earned / values.total) * 100)
+            : 0,
+      }),
+    );
+
     const results: ExamResults = {
-      totalQuestions: questions.length,
+      totalQuestions: sessionQuestions.length,
       correctAnswers: correctCount,
       failedQuestions,
       answers,
-      score:
-        totalPoints > 0 ? Math.round((earnedPoints / totalPoints) * 100) : 0,
+      score: percentageScore,
+      scaledScore,
+      passed: scaledScore >= 700,
       earnedPoints,
       totalPoints,
+      breakdownByType,
     };
 
     onComplete(results);
   };
 
+  useEffect(() => {
+    if (
+      isMicrosoftMode &&
+      timeLeftSeconds === 0 &&
+      !timeoutSubmitted &&
+      sessionQuestions.length > 0
+    ) {
+      setTimeoutSubmitted(true);
+      handleFinish();
+    }
+  }, [
+    isMicrosoftMode,
+    timeLeftSeconds,
+    timeoutSubmitted,
+    sessionQuestions.length,
+  ]);
+
   return (
     <div className="app-shell">
-      <div className="app-container max-w-4xl">
+      <div className="app-container max-w-4xl exam-typography">
         {/* Header */}
-        <div className="mb-6 flex justify-between items-center">
+        <div className="mb-5 sm:mb-6 flex flex-col sm:flex-row gap-3 sm:gap-0 justify-between sm:items-center">
           <div>
             <p className="subtle-text mb-1 text-xs uppercase tracking-[0.18em]">
-              {isTrainingMode ? "Entrenamiento" : "Simulacion"}
+              {isTrainingMode
+                ? "Entrenamiento"
+                : isMicrosoftMode
+                  ? "Simulacion Microsoft"
+                  : "Simulacion"}
             </p>
-            <h1 className="text-3xl font-semibold mb-1">DP-600 Exam</h1>
-            <p className="subtle-text">
-              Question {currentIndex + 1} of {questions.length}
+            <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight mb-1">
+              DP-600 Exam
+            </h1>
+            <p className="subtle-text text-sm sm:text-base">
+              Question {currentIndex + 1} of {sessionQuestions.length}
             </p>
           </div>
-          <button onClick={onCancel} className="btn-ghost px-3 py-2 text-sm">
-            ✕
-          </button>
+          <div className="flex items-center gap-2 sm:gap-3 self-start sm:self-auto">
+            {isMicrosoftMode && timeLeftSeconds !== null && (
+              <div className="px-2.5 sm:px-3 py-2 rounded-lg border border-amber-400/50 bg-amber-900/20 text-amber-100 text-xs sm:text-sm font-semibold">
+                Tiempo: {formatTime(timeLeftSeconds)}
+              </div>
+            )}
+            <button onClick={onCancel} className="btn-ghost px-3 py-2 text-sm">
+              ✕
+            </button>
+          </div>
         </div>
 
         {/* Progress bar */}
@@ -363,15 +631,67 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
             <div
               className="progress-fill h-1.5"
               style={{
-                width: `${((currentIndex + 1) / questions.length) * 100}%`,
+                width: `${((currentIndex + 1) / sessionQuestions.length) * 100}%`,
               }}
             />
           </div>
         </div>
 
+        {/* Scenario Preamble + Description (Show first if it exists) */}
+        {scenario && (
+          <div className="glass-panel p-4 sm:p-6 mb-6 space-y-4">
+            <p className="text-base subtle-text whitespace-pre-wrap leading-relaxed">
+              {SCENARIO_PREAMBLE}
+            </p>
+            {scenario.description && (
+              <>
+                <div className="border-t border-slate-700/50"></div>
+                <div>
+                  <p className="text-sm font-semibold subtle-text mb-2">
+                    Scenario Description:
+                  </p>
+                  <FormattedText
+                    text={scenario.description}
+                    className="text-sm space-y-2"
+                  />
+                </div>
+              </>
+            )}
+            {scenario.scenarioImage && (
+              <>
+                <div className="border-t border-slate-700/50"></div>
+                <div>
+                  <p className="text-sm font-semibold subtle-text mb-2">
+                    Scenario Image:
+                  </p>
+                  <img
+                    src={scenario.scenarioImage}
+                    alt="Scenario"
+                    className="max-w-full h-auto rounded-xl border border-slate-700/50"
+                  />
+                </div>
+              </>
+            )}
+            {scenario.context && (
+              <>
+                <div className="border-t border-slate-700/50"></div>
+                <div>
+                  <p className="text-sm font-semibold subtle-text mb-2">
+                    Context:
+                  </p>
+                  <FormattedText
+                    text={scenario.context}
+                    className="text-sm space-y-2"
+                  />
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
         {/* Case Study */}
         {caseStudy && (
-          <div className="glass-panel p-6 mb-6 space-y-4">
+          <div className="glass-panel p-4 sm:p-6 mb-6 space-y-4">
             <h3 className="text-xl font-semibold">
               Case Study: {caseStudy.title}
             </h3>
@@ -381,7 +701,10 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
                 <p className="text-sm font-semibold subtle-text mb-2">
                   Description
                 </p>
-                <p className="text-sm">{caseStudy.description}</p>
+                <FormattedText
+                  text={caseStudy.description}
+                  className="text-sm space-y-2"
+                />
               </div>
             )}
 
@@ -390,7 +713,10 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
                 <p className="text-sm font-semibold subtle-text mb-2">
                   Scenario
                 </p>
-                <p className="text-sm">{caseStudy.scenario}</p>
+                <FormattedText
+                  text={caseStudy.scenario}
+                  className="text-sm space-y-2"
+                />
               </div>
             )}
 
@@ -399,7 +725,10 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
                 <p className="text-sm font-semibold subtle-text mb-2">
                   Business Requirements
                 </p>
-                <p className="text-sm">{caseStudy.businessRequirements}</p>
+                <FormattedText
+                  text={caseStudy.businessRequirements}
+                  className="text-sm space-y-2"
+                />
               </div>
             )}
 
@@ -408,7 +737,10 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
                 <p className="text-sm font-semibold subtle-text mb-2">
                   Existing Environment
                 </p>
-                <p className="text-sm">{caseStudy.existingEnvironment}</p>
+                <FormattedText
+                  text={caseStudy.existingEnvironment}
+                  className="text-sm space-y-2"
+                />
               </div>
             )}
 
@@ -417,7 +749,10 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
                 <p className="text-sm font-semibold subtle-text mb-2">
                   Problem Statement
                 </p>
-                <p className="text-sm">{caseStudy.problemStatement}</p>
+                <FormattedText
+                  text={caseStudy.problemStatement}
+                  className="text-sm space-y-2"
+                />
               </div>
             )}
 
@@ -426,7 +761,10 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
                 <p className="text-sm font-semibold subtle-text mb-2">
                   Additional Details
                 </p>
-                <p className="text-sm">{caseStudy.exhibits}</p>
+                <FormattedText
+                  text={caseStudy.exhibits}
+                  className="text-sm space-y-2"
+                />
               </div>
             )}
 
@@ -445,28 +783,29 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
           </div>
         )}
 
-        {/* Pregunta */}
-        <div className="glass-panel p-6 sm:p-8 mb-8">
+        {/* Question */}
+        <div className="glass-panel p-4 sm:p-6 md:p-8 mb-6 sm:mb-8">
           {/* Tags */}
           <div className="flex gap-2 mb-6 flex-wrap">
-            <span className="px-3 py-1 rounded-full text-xs font-semibold bg-cyan-900/40 text-cyan-100 border border-cyan-800/60">
+            <span className="px-3 py-1 rounded-full text-xs font-semibold bg-slate-800/70 text-slate-100 border border-slate-600/70">
               {currentQuestion.type}
             </span>
             {currentQuestion.category && (
-              <span className="px-3 py-1 rounded-full text-xs font-semibold bg-emerald-900/40 text-emerald-100 border border-emerald-800/60">
+              <span className="px-3 py-1 rounded-full text-xs font-semibold bg-slate-800/70 text-slate-100 border border-slate-600/70">
                 {currentQuestion.category}
               </span>
             )}
           </div>
 
           {/* Enunciado */}
-          <h2 className="text-2xl sm:text-3xl font-semibold leading-relaxed mb-8">
-            {currentQuestion.question}
-          </h2>
+          <FormattedText
+            text={currentQuestion.question}
+            className="text-[1.2rem] sm:text-[1.55rem] lg:text-[1.95rem] font-semibold leading-[1.45] mb-6 sm:mb-8 space-y-3"
+          />
 
           {/* Question Image (if present) */}
           {currentQuestion.questionImage && (
-            <div className="mb-8 p-4 rounded-xl border border-slate-700/70 bg-slate-900/35">
+            <div className="mb-8 p-4 rounded-xl border border-slate-700/70 bg-slate-900/45">
               <img
                 src={currentQuestion.questionImage}
                 alt="Question context"
@@ -479,49 +818,123 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
           <div className="space-y-4">
             {currentQuestion.type === "single" && currentQuestion.options && (
               <div className="space-y-3">
-                {currentQuestion.options.map((option) => (
-                  <label
-                    key={option.id}
-                    className="flex items-start p-4 rounded-xl border border-slate-700/70 bg-slate-900/35 hover:bg-slate-800/45 hover:border-slate-500 cursor-pointer transition-all"
-                  >
-                    <input
-                      type="radio"
-                      name={currentQuestion.id}
-                      value={option.id}
-                      checked={answers[currentQuestion.id] === option.id}
-                      onChange={() => handleSingleSelect(option.id)}
-                      className="w-5 h-5 mr-4 mt-0.5 flex-shrink-0"
-                    />
-                    <span className="text-base leading-relaxed">
-                      {option.text}
-                    </span>
-                  </label>
-                ))}
+                {currentQuestion.options.map((option) => {
+                  const isUserSelected =
+                    answers[currentQuestion.id] === option.id;
+                  const isCorrect = option.id === currentQuestion.correctAnswer;
+                  const shouldHighlightCorrect =
+                    isTrainingMode &&
+                    showingTrainingFeedback &&
+                    !currentIsPerfect &&
+                    isCorrect;
+                  const shouldShowIncorrect =
+                    isTrainingMode &&
+                    showingTrainingFeedback &&
+                    !currentIsPerfect &&
+                    isUserSelected &&
+                    !isCorrect;
+
+                  return (
+                    <label
+                      key={option.id}
+                      className={`flex items-start p-4 rounded-xl border cursor-pointer transition-all ${
+                        shouldHighlightCorrect
+                          ? "border-emerald-400/60 bg-emerald-500/25 hover:bg-emerald-500/35 shadow-lg shadow-emerald-500/20"
+                          : shouldShowIncorrect
+                            ? "border-rose-400/60 bg-rose-500/20 hover:bg-rose-500/25 shadow-lg shadow-rose-500/15"
+                            : "border-slate-700/70 bg-slate-900/45 hover:bg-slate-800/65 hover:border-slate-500"
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name={currentQuestion.id}
+                        value={option.id}
+                        checked={isUserSelected}
+                        onChange={() => handleSingleSelect(option.id)}
+                        disabled={isTrainingMode && showingTrainingFeedback}
+                        className="w-5 h-5 mr-4 mt-0.5 flex-shrink-0"
+                      />
+                      <FormattedText
+                        text={option.text}
+                        className="text-[1.03rem] sm:text-[1.08rem] leading-relaxed space-y-1"
+                      />
+                      {shouldHighlightCorrect && (
+                        <span className="ml-auto text-emerald-300 font-semibold text-sm">
+                          ✓
+                        </span>
+                      )}
+                      {shouldShowIncorrect && (
+                        <span className="ml-auto text-rose-300 font-semibold text-sm">
+                          ✗
+                        </span>
+                      )}
+                    </label>
+                  );
+                })}
               </div>
             )}
 
             {currentQuestion.type === "multiple" && currentQuestion.options && (
               <div className="space-y-3">
-                {currentQuestion.options.map((option) => (
-                  <label
-                    key={option.id}
-                    className="flex items-start p-4 rounded-xl border border-slate-700/70 bg-slate-900/35 hover:bg-slate-800/45 hover:border-slate-500 cursor-pointer transition-all"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={
-                        (answers[currentQuestion.id] as string[])?.includes(
-                          option.id,
-                        ) || false
-                      }
-                      onChange={() => handleMultipleSelect(option.id)}
-                      className="w-5 h-5 mr-4 mt-0.5 flex-shrink-0"
-                    />
-                    <span className="text-base leading-relaxed">
-                      {option.text}
-                    </span>
-                  </label>
-                ))}
+                {currentQuestion.options.map((option) => {
+                  const isUserSelected = (
+                    answers[currentQuestion.id] as string[]
+                  )?.includes(option.id);
+                  const correctIds = Array.isArray(
+                    currentQuestion.correctAnswer,
+                  )
+                    ? currentQuestion.correctAnswer
+                    : currentQuestion.correctAnswer
+                      ? [currentQuestion.correctAnswer]
+                      : [];
+                  const isCorrect = correctIds.includes(option.id);
+                  const shouldHighlightCorrect =
+                    isTrainingMode &&
+                    showingTrainingFeedback &&
+                    !currentIsPerfect &&
+                    isCorrect;
+                  const shouldShowIncorrect =
+                    isTrainingMode &&
+                    showingTrainingFeedback &&
+                    !currentIsPerfect &&
+                    isUserSelected &&
+                    !isCorrect;
+
+                  return (
+                    <label
+                      key={option.id}
+                      className={`flex items-start p-4 rounded-xl border cursor-pointer transition-all ${
+                        shouldHighlightCorrect
+                          ? "border-emerald-400/60 bg-emerald-500/25 hover:bg-emerald-500/35 shadow-lg shadow-emerald-500/20"
+                          : shouldShowIncorrect
+                            ? "border-rose-400/60 bg-rose-500/20 hover:bg-rose-500/25 shadow-lg shadow-rose-500/15"
+                            : "border-slate-700/70 bg-slate-900/45 hover:bg-slate-800/65 hover:border-slate-500"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isUserSelected || false}
+                        onChange={() => handleMultipleSelect(option.id)}
+                        disabled={isTrainingMode && showingTrainingFeedback}
+                        className="w-5 h-5 mr-4 mt-0.5 flex-shrink-0"
+                      />
+                      <FormattedText
+                        text={option.text}
+                        className="text-[1.03rem] sm:text-[1.08rem] leading-relaxed space-y-1"
+                      />
+                      {shouldHighlightCorrect && (
+                        <span className="ml-auto text-emerald-300 font-semibold text-sm">
+                          ✓
+                        </span>
+                      )}
+                      {shouldShowIncorrect && (
+                        <span className="ml-auto text-rose-300 font-semibold text-sm">
+                          ✗
+                        </span>
+                      )}
+                    </label>
+                  );
+                })}
               </div>
             )}
 
@@ -536,7 +949,7 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
             {currentQuestion.type === "boolean" && (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm border border-slate-700/70 rounded-xl overflow-hidden">
-                  <thead className="bg-slate-900/50">
+                  <thead className="bg-slate-900/65">
                     <tr>
                       <th className="text-left p-3 font-semibold">
                         Statements
@@ -558,7 +971,12 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
                             key={statement.id}
                             className="border-t border-slate-700/60"
                           >
-                            <td className="p-3">{statement.text}</td>
+                            <td className="p-3">
+                              <FormattedText
+                                text={statement.text}
+                                className="text-sm space-y-1"
+                              />
+                            </td>
                             <td className="p-3 text-center">
                               <input
                                 type="radio"
@@ -633,55 +1051,178 @@ export const ExamEngine: React.FC<ExamEngineProps> = ({
               )}
           </div>
 
-          {isTrainingMode && currentHasAnswer && (
+          {isTrainingMode && showingTrainingFeedback && currentHasAnswer && (
             <div
-              className={`mt-6 rounded-xl border p-4 ${
+              className={`mt-6 sm:mt-8 rounded-xl border-2 p-4 sm:p-6 backdrop-blur-sm ${
                 currentIsPerfect
-                  ? "border-emerald-500/50 bg-emerald-900/20"
-                  : "border-rose-500/50 bg-rose-900/20"
+                  ? "border-emerald-400/50 bg-gradient-to-br from-emerald-500/20 via-emerald-900/30 to-slate-900/40 shadow-lg shadow-emerald-500/25"
+                  : "border-amber-400/50 bg-gradient-to-br from-amber-500/20 via-amber-900/30 to-slate-900/40 shadow-lg shadow-amber-500/25"
               }`}
             >
-              <p className="font-semibold mb-1">
-                {currentIsPerfect
-                  ? "Correcto"
-                  : currentPoints > 0
-                    ? "Parcialmente correcto"
-                    : "Incorrecto"}
-              </p>
-              <p className="text-sm subtle-text mb-2">
-                Puntos en esta pregunta: {(currentPoints * 100).toFixed(0)}%
-              </p>
+              <div className="mb-3 p-2 bg-slate-900/50 rounded border-l-4 border-slate-500 text-xs font-mono text-slate-400">
+                Pregunta #{currentQuestion.id}
+              </div>
+
+              <div className="flex items-start sm:items-center gap-3 mb-4">
+                {currentIsPerfect ? (
+                  <>
+                    <div className="text-3xl">🎯</div>
+                    <div>
+                      <p className="font-bold text-lg text-emerald-300">
+                        ¡Respuesta Correcta!
+                      </p>
+                      <p className="text-sm text-emerald-200">
+                        Excelente trabajo
+                      </p>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="text-3xl">
+                      {currentPoints > 0 ? "📊" : "❌"}
+                    </div>
+                    <div>
+                      <p className="font-bold text-lg text-amber-300">
+                        {currentPoints > 0
+                          ? "Respuesta Parcialmente Correcta"
+                          : "Respuesta Incorrecta"}
+                      </p>
+                      <p className="text-sm text-amber-200">
+                        Puntuación: {(currentPoints * 100).toFixed(0)}%
+                      </p>
+                    </div>
+                  </>
+                )}
+              </div>
+
               {!currentIsPerfect && (
-                <p className="text-sm">
-                  Respuesta esperada: {getCorrectAnswerText(currentQuestion)}
-                </p>
+                <div className="space-y-3 mb-4 p-4 rounded-lg bg-slate-900/50 border border-slate-700/50">
+                  <p className="text-sm font-semibold text-slate-300">
+                    📍 Respuesta correcta:
+                  </p>
+                  {currentQuestion.type === "boolean" ? (
+                    <div className="overflow-x-auto rounded-lg border border-emerald-500/30">
+                      <table className="w-full text-sm">
+                        <thead className="bg-emerald-900/30 text-emerald-100">
+                          <tr>
+                            <th className="text-left p-3 font-semibold">
+                              Statement
+                            </th>
+                            <th className="text-center p-3 font-semibold">
+                              Correcto
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(currentQuestion.booleanStatements || []).map(
+                            (statement) => (
+                              <tr
+                                key={statement.id}
+                                className="border-t border-emerald-500/20"
+                              >
+                                <td className="p-3 text-slate-200">
+                                  <FormattedText
+                                    text={statement.text}
+                                    className="text-sm space-y-1"
+                                  />
+                                </td>
+                                <td className="p-3 text-center">
+                                  <span className="inline-flex px-2 py-1 rounded-md text-xs font-semibold bg-emerald-700/40 text-emerald-100 border border-emerald-500/40">
+                                    {statement.correct === "true"
+                                      ? "Yes"
+                                      : "No"}
+                                  </span>
+                                </td>
+                              </tr>
+                            ),
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : currentQuestion.type === "dragdrop" ? (
+                    <div className="space-y-3">
+                      <div className="rounded-lg border border-emerald-500/30 bg-emerald-900/20 p-3">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-emerald-200 mb-3">
+                          Solucion completa
+                        </p>
+                        <DragDropQuestion
+                          items={currentQuestion.dragDropItems || []}
+                          buckets={currentQuestion.dragDropBuckets || []}
+                          template={currentQuestion.dragDropTemplate}
+                          currentAnswer={getDragDropSolvedAssignments(
+                            currentQuestion,
+                          )}
+                          onChange={() => {}}
+                          readOnly
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="px-3 py-2 bg-emerald-900/40 border-l-3 border-emerald-400 rounded text-sm text-emerald-200">
+                      {getCorrectAnswerText(currentQuestion)}
+                    </div>
+                  )}
+                </div>
               )}
+
               {currentQuestion.explanation && (
-                <p className="text-sm subtle-text mt-2">
-                  Explicacion: {currentQuestion.explanation}
-                </p>
+                <div className="p-4 rounded-lg bg-slate-800/40 border border-slate-700/50 space-y-2 mb-4">
+                  <p className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                    💡 Explicación:
+                  </p>
+                  <FormattedText
+                    text={currentQuestion.explanation}
+                    className="text-sm text-slate-300 space-y-2 leading-relaxed"
+                  />
+                </div>
               )}
+
+              {currentQuestion.type === "hotspot" &&
+                currentQuestion.hotspotAreas && (
+                  <HotspotFeedbackVisualizer
+                    areas={currentQuestion.hotspotAreas}
+                    imageBase64={currentQuestion.hotspotImage || ""}
+                    correctAreaIds={
+                      currentQuestion.hotspotAreas
+                        ?.filter((a) => a.correct)
+                        .map((a) => a.id) || []
+                    }
+                    userSelectedIds={
+                      (answers[currentQuestion.id] as string[]) || []
+                    }
+                  />
+                )}
             </div>
           )}
         </div>
 
         {/* Navigation */}
-        <div className="flex justify-between gap-4">
+        <div className="flex flex-col-reverse sm:flex-row justify-between gap-3 sm:gap-4">
           <button
             onClick={handlePrevious}
             disabled={currentIndex === 0}
-            className="btn-ghost disabled:opacity-50 disabled:cursor-not-allowed"
+            className="btn-ghost w-full sm:w-auto disabled:opacity-50 disabled:cursor-not-allowed"
           >
             ← Previous
           </button>
 
-          <div className="flex gap-4">
+          <div className="flex w-full sm:w-auto gap-3 sm:gap-4">
             {!isLastQuestion ? (
-              <button onClick={handleNext} className="btn-primary">
-                Next →
+              <button
+                onClick={handleNext}
+                className="btn-primary w-full sm:w-auto"
+              >
+                {isTrainingMode && !showingTrainingFeedback && currentHasAnswer
+                  ? "Ver respuesta →"
+                  : isTrainingMode && showingTrainingFeedback
+                    ? "Siguiente →"
+                    : "Next →"}
               </button>
             ) : (
-              <button onClick={handleFinish} className="btn-secondary">
+              <button
+                onClick={handleFinish}
+                className="btn-secondary w-full sm:w-auto"
+              >
                 Finish Exam
               </button>
             )}

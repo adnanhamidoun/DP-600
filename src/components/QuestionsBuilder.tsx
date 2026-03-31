@@ -3,10 +3,13 @@ import {
   Question,
   QuestionType,
   CaseStudy,
+  Scenario,
   Option,
   BooleanStatement,
+  QUESTION_TYPE_DESCRIPTIONS,
 } from "../types";
 import { storageUtils } from "../utils/storage";
+import { getQuestionTypeDescription } from "../utils/questionTypeHelpers";
 import { HotspotCanvas } from "./HotspotCanvas";
 import { useToast, ToastContainer } from "./Toast";
 import { ExamEngine } from "./ExamEngine";
@@ -23,13 +26,17 @@ export const QuestionsBuilder: React.FC<QuestionsBuilderProps> = ({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [caseStudies, setCaseStudies] = useState<CaseStudy[]>([]);
+  const [scenarios, setScenarios] = useState<Scenario[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingCaseStudyId, setEditingCaseStudyId] = useState<string | null>(
     null,
   );
-  const [activeTab, setActiveTab] = useState<"questions" | "cases" | "review">(
-    "questions",
+  const [editingScenarioId, setEditingScenarioId] = useState<string | null>(
+    null,
   );
+  const [activeTab, setActiveTab] = useState<
+    "questions" | "cases" | "scenarios" | "review"
+  >("questions");
   const [showCaseStudyForm, setShowCaseStudyForm] = useState(false);
   const [filterType, setFilterType] = useState<QuestionType | "all">("all");
   const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null);
@@ -58,6 +65,13 @@ export const QuestionsBuilder: React.FC<QuestionsBuilderProps> = ({
     exhibits: "",
   });
 
+  const [scenarioForm, setScenarioForm] = useState<Partial<Scenario>>({
+    title: "",
+    description: "",
+    context: "",
+    scenarioImage: "",
+  });
+
   const normalizeOptions = (options: Array<Option | string> = []): Option[] => {
     return options.map((opt, idx) => {
       if (typeof opt === "string") {
@@ -79,6 +93,7 @@ export const QuestionsBuilder: React.FC<QuestionsBuilderProps> = ({
   useEffect(() => {
     setQuestions(storageUtils.getCustomQuestions());
     setCaseStudies(storageUtils.getCaseStudies());
+    setScenarios(storageUtils.getScenarios());
   }, []);
 
   // ==================== QUESTIONS ====================
@@ -212,6 +227,7 @@ export const QuestionsBuilder: React.FC<QuestionsBuilderProps> = ({
       correctBoxCount: formData.correctBoxCount,
       booleanStatements: formData.booleanStatements,
       caseStudyId: formData.caseStudyId,
+      scenarioId: formData.scenarioId,
     };
 
     return question;
@@ -568,15 +584,146 @@ export const QuestionsBuilder: React.FC<QuestionsBuilderProps> = ({
     }
   };
 
+  const handleEditScenario = (scn: Scenario) => {
+    setScenarioForm(scn);
+    setEditingScenarioId(scn.id);
+  };
+
+  const normalizeTextForExport = (value?: string) => {
+    if (!value) return "";
+    return value
+      .replace(/\r\n/g, "\n")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .replace(/[ \t]{2,}/g, " ")
+      .trim();
+  };
+
+  const normalizeQuestionForExport = (question: Question): Question => ({
+    ...question,
+    question: normalizeTextForExport(question.question),
+    explanation: normalizeTextForExport(question.explanation),
+    options: question.options?.map((opt) => ({
+      ...opt,
+      text: normalizeTextForExport(opt.text),
+    })),
+    steps: question.steps?.map((step) => ({
+      ...step,
+      text: normalizeTextForExport(step.text),
+    })),
+    dragDropItems: question.dragDropItems?.map((item) => ({
+      ...item,
+      text: normalizeTextForExport(item.text),
+    })),
+    dragDropBuckets: question.dragDropBuckets?.map((bucket) => ({
+      ...bucket,
+      label: normalizeTextForExport(bucket.label),
+    })),
+    dragDropTemplate: question.dragDropTemplate
+      ? question.dragDropTemplate.replace(/\r\n/g, "\n").trim()
+      : question.dragDropTemplate,
+    booleanStatements: question.booleanStatements?.map((statement) => ({
+      ...statement,
+      text: normalizeTextForExport(statement.text),
+    })),
+  });
+
+  const normalizeCaseForExport = (cs: CaseStudy): CaseStudy => ({
+    ...cs,
+    title: normalizeTextForExport(cs.title),
+    description: normalizeTextForExport(cs.description),
+    scenario: normalizeTextForExport(cs.scenario),
+    businessRequirements: normalizeTextForExport(cs.businessRequirements),
+    existingEnvironment: normalizeTextForExport(cs.existingEnvironment),
+    problemStatement: normalizeTextForExport(cs.problemStatement),
+    exhibits: normalizeTextForExport(cs.exhibits),
+  });
+
+  const normalizeScenarioForExport = (scn: Scenario): Scenario => ({
+    ...scn,
+    title: normalizeTextForExport(scn.title),
+    description: normalizeTextForExport(scn.description),
+    context: normalizeTextForExport(scn.context),
+  });
+
+  const buildReadableQuestionsMarkdown = (questionsList: Question[]) => {
+    const lines: string[] = [
+      "# Questions Export (Readable)",
+      "",
+      `Generated: ${new Date().toISOString()}`,
+      `Total questions: ${questionsList.length}`,
+      "",
+    ];
+
+    questionsList.forEach((q, idx) => {
+      lines.push(`## ${idx + 1}. ${q.id} [${q.type}]`);
+      if (q.topic) lines.push(`Topic: ${q.topic}`);
+      if (q.category) lines.push(`Category: ${q.category}`);
+      lines.push("");
+      lines.push("Question:");
+      lines.push(q.question || "(empty)");
+      lines.push("");
+
+      if (q.options && q.options.length > 0) {
+        lines.push("Options:");
+        q.options.forEach((opt) => {
+          lines.push(`- ${opt.id}: ${opt.text}`);
+        });
+        lines.push("");
+      }
+
+      if (q.dragDropTemplate) {
+        lines.push("DragDropTemplate:");
+        lines.push("```text");
+        lines.push(q.dragDropTemplate);
+        lines.push("```");
+        lines.push("");
+      }
+
+      if (q.explanation) {
+        lines.push("Explanation:");
+        lines.push(q.explanation);
+        lines.push("");
+      }
+
+      lines.push("---");
+      lines.push("");
+    });
+
+    return lines.join("\n");
+  };
+
+  const resetScenarioForm = () => {
+    setScenarioForm({
+      title: "",
+      description: "",
+      context: "",
+      scenarioImage: "",
+    });
+    setEditingScenarioId(null);
+  };
+
   // ==================== EXPORT/IMPORT ====================
   const handleExportAll = async () => {
     try {
       const zip = new JSZip();
-      const customQuestions = storageUtils.getCustomQuestions();
-      const cases = storageUtils.getCaseStudies();
+      const customQuestions = storageUtils
+        .getCustomQuestions()
+        .map((q) => normalizeQuestionForExport(q));
+      const cases = storageUtils
+        .getCaseStudies()
+        .map((cs) => normalizeCaseForExport(cs));
+      const scenariosList = storageUtils
+        .getScenarios()
+        .map((scn) => normalizeScenarioForExport(scn));
 
       zip.file("questions.json", JSON.stringify(customQuestions, null, 2));
       zip.file("cases.json", JSON.stringify(cases, null, 2));
+      zip.file("scenarios.json", JSON.stringify(scenariosList, null, 2));
+      zip.file(
+        "questions-readable.md",
+        buildReadableQuestionsMarkdown(customQuestions),
+      );
 
       const blob = await zip.generateAsync({ type: "blob" });
       const url = URL.createObjectURL(blob);
@@ -586,7 +733,7 @@ export const QuestionsBuilder: React.FC<QuestionsBuilderProps> = ({
       a.click();
       URL.revokeObjectURL(url);
 
-      toast.success("Backup created");
+      toast.success("Backup created (JSON + readable markdown)");
     } catch {
       toast.error("Export failed");
     }
@@ -604,12 +751,16 @@ export const QuestionsBuilder: React.FC<QuestionsBuilderProps> = ({
 
       const questionsFile = zip.file("questions.json");
       const casesFile = zip.file("cases.json");
+      const scenariosFile = zip.file("scenarios.json");
 
       const questionsData = questionsFile
         ? JSON.parse(await questionsFile.async("text"))
         : [];
       const casesData = casesFile
         ? JSON.parse(await casesFile.async("text"))
+        : [];
+      const scenariosData = scenariosFile
+        ? JSON.parse(await scenariosFile.async("text"))
         : [];
 
       const summary = storageUtils.importBackupData(
@@ -618,8 +769,25 @@ export const QuestionsBuilder: React.FC<QuestionsBuilderProps> = ({
         importMode,
       );
 
+      // Import scenarios
+      if (Array.isArray(scenariosData) && scenariosData.length > 0) {
+        const existingScenarios =
+          importMode === "replace" ? [] : storageUtils.getScenarios();
+        const allScenarios = [...existingScenarios];
+
+        scenariosData.forEach((scn: Scenario) => {
+          const exists = allScenarios.find((s) => s.id === scn.id);
+          if (!exists) {
+            allScenarios.push(scn);
+          }
+        });
+
+        storageUtils.saveScenarios(allScenarios);
+      }
+
       setQuestions(storageUtils.getCustomQuestions());
       setCaseStudies(storageUtils.getCaseStudies());
+      setScenarios(storageUtils.getScenarios());
       toast.success(
         `Import done: ${summary.questionsAfter} questions (${summary.questionsSkippedDuplicates} duplicates cleaned), ${summary.casesAfter} case studies`,
       );
@@ -628,6 +796,16 @@ export const QuestionsBuilder: React.FC<QuestionsBuilderProps> = ({
     } finally {
       e.target.value = "";
     }
+  };
+
+  const handleCleanAllTextContent = () => {
+    const summary = storageUtils.cleanAllTextContent();
+    setQuestions(storageUtils.getCustomQuestions());
+    setCaseStudies(storageUtils.getCaseStudies());
+    setScenarios(storageUtils.getScenarios());
+    toast.success(
+      `Text cleaned: ${summary.questions} questions, ${summary.caseStudies} cases, ${summary.scenarios} scenarios`,
+    );
   };
 
   // Helper functions for filtering and review
@@ -679,6 +857,16 @@ export const QuestionsBuilder: React.FC<QuestionsBuilderProps> = ({
             Case Studies
           </button>
           <button
+            onClick={() => setActiveTab("scenarios")}
+            className={`px-4 py-2 rounded-t-lg font-semibold transition-colors ${
+              activeTab === "scenarios"
+                ? "bg-slate-800/55 text-cyan-200"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            Scenarios
+          </button>
+          <button
             onClick={() => setActiveTab("review")}
             className={`px-4 py-2 rounded-t-lg font-semibold transition-colors ${
               activeTab === "review"
@@ -708,14 +896,21 @@ export const QuestionsBuilder: React.FC<QuestionsBuilderProps> = ({
                     }
                     className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2"
                   >
-                    <option value="single">Single choice</option>
-                    <option value="multiple">Multiple choice</option>
-                    <option value="boolean">True/False</option>
-                    <option value="ordering">Ordering</option>
-                    <option value="dragdrop">Drag and Drop</option>
-                    <option value="hotspot">Hotspot</option>
-                    <option value="dropdown">Dropdown</option>
+                    {Object.entries(QUESTION_TYPE_DESCRIPTIONS).map(
+                      ([type, { label, category }]) => (
+                        <option key={type} value={type}>
+                          {label} ({category})
+                        </option>
+                      ),
+                    )}
                   </select>
+                  {formData.type && (
+                    <p className="mt-2 text-xs text-slate-400 italic">
+                      {getQuestionTypeDescription(
+                        formData.type as QuestionType,
+                      )}
+                    </p>
+                  )}
                 </div>
 
                 {/* Case Study */}
@@ -738,6 +933,32 @@ export const QuestionsBuilder: React.FC<QuestionsBuilderProps> = ({
                       {caseStudies.map((cs) => (
                         <option key={cs.id} value={cs.id}>
                           {cs.title}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {/* Associated Scenario */}
+                {scenarios.length > 0 && (
+                  <div className="mb-6">
+                    <label className="block text-sm font-semibold mb-2">
+                      Associated Scenario
+                    </label>
+                    <select
+                      value={formData.scenarioId || ""}
+                      onChange={(e) =>
+                        setFormData({
+                          ...formData,
+                          scenarioId: e.target.value || undefined,
+                        })
+                      }
+                      className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2"
+                    >
+                      <option value="">None</option>
+                      {scenarios.map((scn) => (
+                        <option key={scn.id} value={scn.id}>
+                          {scn.title}
                         </option>
                       ))}
                     </select>
@@ -1421,6 +1642,13 @@ export const QuestionsBuilder: React.FC<QuestionsBuilderProps> = ({
                 </button>
               </div>
 
+              <button
+                onClick={handleCleanAllTextContent}
+                className="btn-secondary w-full text-sm"
+              >
+                Clean Existing Texts
+              </button>
+
               <input
                 ref={fileInputRef}
                 type="file"
@@ -1614,6 +1842,10 @@ export const QuestionsBuilder: React.FC<QuestionsBuilderProps> = ({
                     <p className="text-xs text-gray-400 line-clamp-1">
                       {cs.description}
                     </p>
+                    <div className="text-xs text-cyan-300 mb-1">
+                      {questions.filter((q) => q.caseStudyId === cs.id).length}{" "}
+                      question(s)
+                    </div>
                     <div className="flex gap-1 mt-1">
                       <button
                         onClick={() => handleEditCaseStudy(cs)}
@@ -1630,6 +1862,233 @@ export const QuestionsBuilder: React.FC<QuestionsBuilderProps> = ({
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* SCENARIOS TAB */}
+        {activeTab === "scenarios" && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            {/* Scenario Form */}
+            <div className="lg:col-span-2">
+              <div className="glass-panel p-6">
+                <h2 className="text-2xl font-semibold mb-6">Create Scenario</h2>
+
+                <div className="mb-6">
+                  <label className="block text-sm font-semibold mb-2">
+                    Scenario Title
+                  </label>
+                  <input
+                    type="text"
+                    value={scenarioForm.title || ""}
+                    onChange={(e) =>
+                      setScenarioForm({
+                        ...scenarioForm,
+                        title: e.target.value,
+                      })
+                    }
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2"
+                    placeholder="Scenario title (e.g., Contoso Migration, Data Analysis Project)"
+                  />
+                </div>
+
+                <div className="mb-6">
+                  <label className="block text-sm font-semibold mb-2">
+                    Scenario Text / Question
+                  </label>
+                  <textarea
+                    value={scenarioForm.description || ""}
+                    onChange={(e) =>
+                      setScenarioForm({
+                        ...scenarioForm,
+                        description: e.target.value,
+                      })
+                    }
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 h-24"
+                    placeholder="Write the scenario statement or question text..."
+                  />
+                </div>
+
+                <div className="mb-6">
+                  <label className="block text-sm font-semibold mb-2">
+                    Scenario Image (Optional)
+                  </label>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        const reader = new FileReader();
+                        reader.onload = (event) => {
+                          setScenarioForm({
+                            ...scenarioForm,
+                            scenarioImage: event.target?.result as string,
+                          });
+                        };
+                        reader.readAsDataURL(file);
+                      }
+                    }}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2"
+                  />
+                  {scenarioForm.scenarioImage && (
+                    <div className="mt-3">
+                      <img
+                        src={scenarioForm.scenarioImage}
+                        alt="Scenario preview"
+                        className="max-h-40 rounded border border-gray-700"
+                      />
+                      <button
+                        onClick={() =>
+                          setScenarioForm({
+                            ...scenarioForm,
+                            scenarioImage: "",
+                          })
+                        }
+                        className="mt-2 text-xs px-3 py-1 rounded bg-rose-700/70 hover:bg-rose-600/70"
+                      >
+                        Remove image
+                      </button>
+                    </div>
+                  )}
+                  <p className="text-xs text-gray-400 mt-2">
+                    A scenario can have text, image, or both.
+                  </p>
+                </div>
+
+                <div className="mb-6">
+                  <label className="block text-sm font-semibold mb-2">
+                    Context (Optional)
+                  </label>
+                  <textarea
+                    value={scenarioForm.context || ""}
+                    onChange={(e) =>
+                      setScenarioForm({
+                        ...scenarioForm,
+                        context: e.target.value,
+                      })
+                    }
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 h-32"
+                    placeholder="Additional context or background information..."
+                  />
+                </div>
+
+                <button
+                  onClick={() => {
+                    if (!scenarioForm.title?.trim()) {
+                      toast.error("Please enter a scenario title");
+                      return;
+                    }
+
+                    const hasScenarioText = !!(
+                      scenarioForm.description?.trim() ||
+                      scenarioForm.context?.trim()
+                    );
+                    const hasScenarioImage = !!scenarioForm.scenarioImage;
+
+                    if (!hasScenarioText && !hasScenarioImage) {
+                      toast.error("Add scenario text/question, image, or both");
+                      return;
+                    }
+
+                    const newScenario: Scenario = {
+                      id: scenarioForm.id || `scn-${Date.now()}`,
+                      title: scenarioForm.title.trim(),
+                      description: scenarioForm.description?.trim() || "",
+                      context: scenarioForm.context?.trim() || "",
+                      scenarioImage: scenarioForm.scenarioImage || undefined,
+                    };
+                    storageUtils.addScenario(newScenario);
+                    setScenarios(storageUtils.getScenarios());
+                    resetScenarioForm();
+                    toast.success(
+                      editingScenarioId
+                        ? "Scenario updated!"
+                        : "Scenario created!",
+                    );
+                  }}
+                  className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 rounded"
+                >
+                  {editingScenarioId ? "Update Scenario" : "Create Scenario"}
+                </button>
+                {editingScenarioId && (
+                  <button
+                    onClick={() => resetScenarioForm()}
+                    className="w-full mt-2 bg-gray-700 hover:bg-gray-600 text-white font-semibold py-2 rounded"
+                  >
+                    Cancel Edit
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Scenarios List */}
+            <div className="lg:col-span-1">
+              <div className="glass-panel p-6">
+                <h2 className="text-lg font-semibold mb-4">
+                  Scenarios ({scenarios.length})
+                </h2>
+                <div className="space-y-3">
+                  {scenarios.length === 0 ? (
+                    <p className="text-xs text-gray-500">
+                      No scenarios created yet
+                    </p>
+                  ) : (
+                    scenarios.map((scn) => (
+                      <div
+                        key={scn.id}
+                        className="bg-gray-800 p-3 rounded border border-gray-700"
+                      >
+                        <div className="flex justify-between items-start mb-2">
+                          <h3 className="font-semibold text-sm">{scn.title}</h3>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => handleEditScenario(scn)}
+                              className="text-xs bg-cyan-600/20 text-cyan-300 hover:bg-cyan-600/40 px-2 py-1 rounded"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => {
+                                storageUtils.deleteScenario(scn.id);
+                                setScenarios(storageUtils.getScenarios());
+                                toast.success("Scenario deleted");
+                              }}
+                              className="text-xs bg-red-600/20 text-red-300 hover:bg-red-600/40 px-2 py-1 rounded"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                        {scn.description && (
+                          <p className="text-xs text-gray-400 mb-2 line-clamp-2">
+                            {scn.description}
+                          </p>
+                        )}
+                        {scn.scenarioImage && (
+                          <img
+                            src={scn.scenarioImage}
+                            alt="Scenario"
+                            className="w-full max-h-24 object-cover rounded border border-gray-700 mb-2"
+                          />
+                        )}
+                        {scn.context && (
+                          <p className="text-xs text-gray-500 mb-2 line-clamp-1 italic">
+                            {scn.context}
+                          </p>
+                        )}
+                        <div className="text-xs text-cyan-300">
+                          {
+                            questions.filter((q) => q.scenarioId === scn.id)
+                              .length
+                          }{" "}
+                          question(s)
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -1912,6 +2371,7 @@ export const QuestionsBuilder: React.FC<QuestionsBuilderProps> = ({
           <div className="min-h-screen pt-16 pb-6">
             <ExamEngine
               questions={[previewQuestion]}
+              scenarios={scenarios}
               onComplete={() => setShowPreview(false)}
               onCancel={() => setShowPreview(false)}
             />

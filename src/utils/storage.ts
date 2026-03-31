@@ -1,20 +1,153 @@
-import { ExamSession, Question, TopicProgress, CaseStudy } from "../types";
+import { Question, CaseStudy, Scenario } from "../types";
 
-const STORAGE_KEY = "dp600_exam_sessions";
-const FAILED_QUESTIONS_KEY = "dp600_failed_questions";
-const CUSTOM_QUESTIONS_KEY = "dp600_custom_questions";
-const CASE_STUDIES_KEY = "dp600_case_studies";
+const DB_NAME = "DP600ExamDB";
+const DB_VERSION = 1;
+const FAILED_QUESTIONS_STORE = "failedQuestions";
+const CUSTOM_QUESTIONS_STORE = "customQuestions";
+const CASE_STUDIES_STORE = "caseStudies";
+const SCENARIOS_STORE = "scenarios";
 type ImportMode = "replace" | "merge";
+
+// Cache en memoria para operaciones rápidas
+const cache = {
+  failedQuestions: null as Question[] | null,
+  customQuestions: null as Question[] | null,
+  caseStudies: null as CaseStudy[] | null,
+  scenarios: null as Scenario[] | null,
+};
+
+let dbInstance: IDBDatabase | null = null;
+
+// Inicializar IndexedDB con stores
+const initDB = (): Promise<IDBDatabase> => {
+  return new Promise((resolve, reject) => {
+    if (dbInstance) {
+      resolve(dbInstance);
+      return;
+    }
+
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      dbInstance = request.result;
+      resolve(dbInstance);
+    };
+
+    request.onupgradeneeded = (event) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+
+      // Crear stores si no existen
+      const storeNames = [
+        FAILED_QUESTIONS_STORE,
+        CUSTOM_QUESTIONS_STORE,
+        CASE_STUDIES_STORE,
+        SCENARIOS_STORE,
+      ];
+
+      storeNames.forEach((storeName) => {
+        if (!db.objectStoreNames.contains(storeName)) {
+          db.createObjectStore(storeName, {
+            keyPath: "id",
+            autoIncrement: true,
+          });
+        }
+      });
+    };
+  });
+};
+
+// Helper para leer de IndexedDB
+const readFromStore = (storeName: string): Promise<any[]> => {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const db = await initDB();
+      const transaction = db.transaction(storeName, "readonly");
+      const store = transaction.objectStore(storeName);
+      const request = store.getAll();
+
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve(request.result);
+    } catch (error) {
+      reject(error);
+    }
+  });
+};
+
+// Helper para escribir a IndexedDB
+const writeToStore = (storeName: string, data: any[]): Promise<void> => {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const db = await initDB();
+      const transaction = db.transaction(storeName, "readwrite");
+      const store = transaction.objectStore(storeName);
+
+      // Limpiar store y escribir datos nuevos
+      store.clear();
+      data.forEach((item) => store.add(item));
+
+      transaction.onerror = () => reject(transaction.error);
+      transaction.oncomplete = () => resolve();
+    } catch (error) {
+      reject(error);
+    }
+  });
+};
+
+// Precargar todo al inicio
+const preloadCache = async () => {
+  try {
+    const [failedQuestions, customQuestions, caseStudies, scenarios] =
+      await Promise.all([
+        readFromStore(FAILED_QUESTIONS_STORE),
+        readFromStore(CUSTOM_QUESTIONS_STORE),
+        readFromStore(CASE_STUDIES_STORE),
+        readFromStore(SCENARIOS_STORE),
+      ]);
+
+    cache.failedQuestions = failedQuestions;
+    cache.customQuestions = customQuestions;
+    cache.caseStudies = caseStudies;
+    cache.scenarios = scenarios;
+  } catch (error) {
+    console.error("Error preloading cache:", error);
+  }
+};
+
+// Iniciar precarga al cargar el módulo
+preloadCache();
 
 const toCanonicalQuestionId = (index: number) =>
   `Q${String(index + 1).padStart(3, "0")}`;
 
+const normalizeText = (value?: string): string => {
+  if (!value) return "";
+  return value
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+};
+
+const normalizeTemplateText = (value?: string): string => {
+  if (!value) return "";
+  return value
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+};
+
 const normalizeQuestion = (question: Question): Question => {
   const normalizedOptions = question.options?.map((opt, idx) => {
     if (typeof opt === "string") {
-      return { id: `opt-${idx + 1}`, text: opt };
+      return { id: `opt-${idx + 1}`, text: normalizeText(opt) };
     }
-    return opt;
+    return {
+      ...opt,
+      text: normalizeText(opt.text),
+    };
   });
 
   const resolveOptionIdByIndex = (index: number): string | undefined => {
@@ -41,8 +174,8 @@ const normalizeQuestion = (question: Question): Question => {
     const shouldReplaceGeneric = /^item\s*\d+$/i.test(currentText);
     const text =
       (!currentText || shouldReplaceGeneric) && legacyText
-        ? legacyText
-        : currentText || `Value ${idx + 1}`;
+        ? normalizeText(legacyText)
+        : normalizeText(currentText || `Value ${idx + 1}`);
 
     const legacyBucketId =
       (item as unknown as { bucketId?: string }).bucketId || undefined;
@@ -96,31 +229,49 @@ const normalizeQuestion = (question: Question): Question => {
     (bucket, idx) => ({
       ...bucket,
       id: bucket.id || `slot-${idx + 1}`,
-      label: bucket.label || `Answer ${idx + 1}`,
+      label: normalizeText(bucket.label || `Answer ${idx + 1}`),
     }),
   );
 
   return {
     ...question,
+    question: normalizeText(question.question),
+    explanation: normalizeText(question.explanation),
     options: normalizedOptions,
     correctAnswer: normalizedCorrectAnswer,
+    steps: question.steps?.map((step) => ({
+      ...step,
+      text: normalizeText(step.text),
+    })),
     dragDropItems:
       mergedDragDropItems.length > 0
         ? mergedDragDropItems
         : normalizedDragDropItems,
     dragDropBuckets: normalizedDragDropBuckets,
+    dragDropTemplate: normalizeTemplateText(question.dragDropTemplate),
+    booleanStatements: question.booleanStatements?.map((statement) => ({
+      ...statement,
+      text: normalizeText(statement.text),
+    })),
   };
 };
 
 const normalizeCaseStudy = (caseStudy: CaseStudy): CaseStudy => ({
   ...caseStudy,
-  title: (caseStudy.title || "").trim(),
-  description: (caseStudy.description || "").trim(),
-  scenario: (caseStudy.scenario || "").trim(),
-  businessRequirements: caseStudy.businessRequirements?.trim(),
-  existingEnvironment: caseStudy.existingEnvironment?.trim(),
-  problemStatement: caseStudy.problemStatement?.trim(),
-  exhibits: (caseStudy.exhibits || "").trim(),
+  title: normalizeText(caseStudy.title),
+  description: normalizeText(caseStudy.description),
+  scenario: normalizeText(caseStudy.scenario),
+  businessRequirements: normalizeText(caseStudy.businessRequirements),
+  existingEnvironment: normalizeText(caseStudy.existingEnvironment),
+  problemStatement: normalizeText(caseStudy.problemStatement),
+  exhibits: normalizeText(caseStudy.exhibits),
+});
+
+const normalizeScenario = (scenario: Scenario): Scenario => ({
+  ...scenario,
+  title: normalizeText(scenario.title),
+  description: normalizeText(scenario.description),
+  context: normalizeText(scenario.context),
 });
 
 const questionFingerprint = (question: Question): string => {
@@ -201,9 +352,7 @@ const canonicalizeQuestionIds = (questions: Question[]) => {
 };
 
 const remapQuestionIdsInFailed = (idMap: Map<string, string>) => {
-  const data = localStorage.getItem(FAILED_QUESTIONS_KEY);
-  if (!data) return;
-  const failed: Question[] = JSON.parse(data);
+  const failed = cache.failedQuestions || [];
   let changed = false;
 
   const remapped = failed.map((question) => {
@@ -216,78 +365,19 @@ const remapQuestionIdsInFailed = (idMap: Map<string, string>) => {
   });
 
   if (changed) {
-    localStorage.setItem(FAILED_QUESTIONS_KEY, JSON.stringify(remapped));
-  }
-};
-
-const remapQuestionIdsInSessions = (idMap: Map<string, string>) => {
-  const data = localStorage.getItem(STORAGE_KEY);
-  if (!data) return;
-  const sessions: ExamSession[] = JSON.parse(data);
-  let changed = false;
-
-  const remappedSessions = sessions.map((session) => {
-    let sessionChanged = false;
-
-    const remappedFailed = session.failedQuestions.map((question) => {
-      const newId = idMap.get(question.id);
-      if (newId && newId !== question.id) {
-        sessionChanged = true;
-        return { ...question, id: newId };
-      }
-      return question;
-    });
-
-    const remappedAnswers: Record<string, unknown> = {};
-    Object.entries(session.answers || {}).forEach(([key, value]) => {
-      const newKey = idMap.get(key) || key;
-      if (newKey !== key) {
-        sessionChanged = true;
-      }
-      remappedAnswers[newKey] = value;
-    });
-
-    if (sessionChanged) {
-      changed = true;
-      return {
-        ...session,
-        failedQuestions: remappedFailed,
-        answers: remappedAnswers,
-      };
-    }
-    return session;
-  });
-
-  if (changed) {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(remappedSessions));
+    storageUtils.saveFailedQuestions(remapped);
   }
 };
 
 export const storageUtils = {
-  // Sesiones
-  saveSessions: (sessions: ExamSession[]) => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
-  },
-
-  getSessions: (): ExamSession[] => {
-    const data = localStorage.getItem(STORAGE_KEY);
-    return data ? JSON.parse(data) : [];
-  },
-
-  addSession: (session: ExamSession) => {
-    const sessions = storageUtils.getSessions();
-    sessions.push(session);
-    storageUtils.saveSessions(sessions);
-  },
-
   // Preguntas falladas
   saveFailedQuestions: (questions: Question[]) => {
-    localStorage.setItem(FAILED_QUESTIONS_KEY, JSON.stringify(questions));
+    cache.failedQuestions = questions;
+    writeToStore(FAILED_QUESTIONS_STORE, questions).catch(console.error);
   },
 
   getFailedQuestions: (): Question[] => {
-    const data = localStorage.getItem(FAILED_QUESTIONS_KEY);
-    return data ? JSON.parse(data) : [];
+    return cache.failedQuestions || [];
   },
 
   addFailedQuestion: (question: Question) => {
@@ -300,24 +390,26 @@ export const storageUtils = {
   },
 
   clearFailedQuestions: () => {
-    localStorage.removeItem(FAILED_QUESTIONS_KEY);
+    cache.failedQuestions = [];
+    writeToStore(FAILED_QUESTIONS_STORE, []).catch(console.error);
   },
 
   // Preguntas personalizadas
   saveCustomQuestions: (questions: Question[]) => {
-    localStorage.setItem(CUSTOM_QUESTIONS_KEY, JSON.stringify(questions));
+    cache.customQuestions = questions;
+    writeToStore(CUSTOM_QUESTIONS_STORE, questions).catch(console.error);
   },
 
   getCustomQuestions: (): Question[] => {
-    const data = localStorage.getItem(CUSTOM_QUESTIONS_KEY);
-    const parsed: Question[] = data ? JSON.parse(data) : [];
+    const data = cache.customQuestions || [];
+    const parsed: Question[] = data;
     const normalized = parsed.map((q) => normalizeQuestion(q));
     const { canonical, idMap, changed } = canonicalizeQuestionIds(normalized);
 
     if (changed) {
-      localStorage.setItem(CUSTOM_QUESTIONS_KEY, JSON.stringify(canonical));
+      cache.customQuestions = canonical;
+      writeToStore(CUSTOM_QUESTIONS_STORE, canonical).catch(console.error);
       remapQuestionIdsInFailed(idMap);
-      remapQuestionIdsInSessions(idMap);
     }
 
     return canonical;
@@ -342,26 +434,31 @@ export const storageUtils = {
   },
 
   clearCustomQuestions: () => {
-    localStorage.removeItem(CUSTOM_QUESTIONS_KEY);
+    cache.customQuestions = [];
+    writeToStore(CUSTOM_QUESTIONS_STORE, []).catch(console.error);
   },
 
   // Casos de estudio
   saveCaseStudies: (caseStudies: CaseStudy[]) => {
-    localStorage.setItem(CASE_STUDIES_KEY, JSON.stringify(caseStudies));
+    const normalized = caseStudies.map((caseStudy) =>
+      normalizeCaseStudy(caseStudy),
+    );
+    cache.caseStudies = normalized;
+    writeToStore(CASE_STUDIES_STORE, normalized).catch(console.error);
   },
 
   getCaseStudies: (): CaseStudy[] => {
-    const data = localStorage.getItem(CASE_STUDIES_KEY);
-    return data ? JSON.parse(data) : [];
+    return cache.caseStudies || [];
   },
 
   addCaseStudy: (caseStudy: CaseStudy) => {
     const studies = storageUtils.getCaseStudies();
-    const index = studies.findIndex((c) => c.id === caseStudy.id);
+    const normalized = normalizeCaseStudy(caseStudy);
+    const index = studies.findIndex((c) => c.id === normalized.id);
     if (index >= 0) {
-      studies[index] = caseStudy;
+      studies[index] = normalized;
     } else {
-      studies.push(caseStudy);
+      studies.push(normalized);
     }
     storageUtils.saveCaseStudies(studies);
   },
@@ -379,7 +476,48 @@ export const storageUtils = {
   },
 
   clearCaseStudies: () => {
-    localStorage.removeItem(CASE_STUDIES_KEY);
+    cache.caseStudies = [];
+    writeToStore(CASE_STUDIES_STORE, []).catch(console.error);
+  },
+
+  // ========== SCENARIOS ==========
+  saveScenarios: (scenarios: Scenario[]) => {
+    const normalized = scenarios.map((scenario) => normalizeScenario(scenario));
+    cache.scenarios = normalized;
+    writeToStore(SCENARIOS_STORE, normalized).catch(console.error);
+  },
+
+  getScenarios: (): Scenario[] => {
+    return cache.scenarios || [];
+  },
+
+  addScenario: (scenario: Scenario) => {
+    const scenarios = storageUtils.getScenarios();
+    const normalized = normalizeScenario(scenario);
+    const index = scenarios.findIndex((s) => s.id === normalized.id);
+    if (index >= 0) {
+      scenarios[index] = normalized;
+    } else {
+      scenarios.push(normalized);
+    }
+    storageUtils.saveScenarios(scenarios);
+  },
+
+  deleteScenario: (scenarioId: string) => {
+    const scenarios = storageUtils.getScenarios();
+    const updated = scenarios.filter((s) => s.id !== scenarioId);
+    storageUtils.saveScenarios(updated);
+    // Also remove scenario association from questions
+    const questions = storageUtils.getCustomQuestions();
+    const updatedQuestions = questions.map((q) =>
+      q.scenarioId === scenarioId ? { ...q, scenarioId: undefined } : q,
+    );
+    storageUtils.saveCustomQuestions(updatedQuestions);
+  },
+
+  clearScenarios: () => {
+    cache.scenarios = [];
+    writeToStore(SCENARIOS_STORE, []).catch(console.error);
   },
 
   importBackupData: (
@@ -446,24 +584,123 @@ export const storageUtils = {
     };
   },
 
-  // Progreso por tópico
-  getProgressByTopic: (sessions: ExamSession[]): TopicProgress[] => {
-    const topicMap = new Map<string, { total: number; correct: number }>();
+  cleanAllTextContent: () => {
+    const currentQuestions = storageUtils.getCustomQuestions();
+    const currentCases = storageUtils.getCaseStudies();
+    const currentScenarios = storageUtils.getScenarios();
+    const currentFailed = storageUtils.getFailedQuestions();
 
-    sessions.forEach((session) => {
-      session.answers &&
-        Object.entries(session.answers).forEach(() => {
-          // Lógica simplificada
+    const cleanedQuestions = currentQuestions.map((q) => normalizeQuestion(q));
+    const cleanedCases = currentCases.map((c) => normalizeCaseStudy(c));
+    const cleanedScenarios = currentScenarios.map((s) => normalizeScenario(s));
+    const cleanedFailed = currentFailed.map((q) => normalizeQuestion(q));
+
+    storageUtils.saveCustomQuestions(cleanedQuestions);
+    storageUtils.saveCaseStudies(cleanedCases);
+    storageUtils.saveScenarios(cleanedScenarios);
+    storageUtils.saveFailedQuestions(cleanedFailed);
+
+    return {
+      questions: cleanedQuestions.length,
+      caseStudies: cleanedCases.length,
+      scenarios: cleanedScenarios.length,
+      failedQuestions: cleanedFailed.length,
+    };
+  },
+
+  // Training Mode State Persistence
+  saveTrainingState: (state: {
+    questionsIds: string[];
+    currentIndex: number;
+    answers: Record<string, unknown>;
+    timestamp: number;
+  }) => {
+    try {
+      // Compress answers: stringify arrays/objects to reduce size
+      const compressedAnswers: Record<string, unknown> = {};
+      Object.entries(state.answers).forEach(([key, value]) => {
+        if (
+          Array.isArray(value) ||
+          (typeof value === "object" && value !== null)
+        ) {
+          compressedAnswers[key] = JSON.stringify(value);
+        } else {
+          compressedAnswers[key] = value;
+        }
+      });
+
+      const compressedState = {
+        questionsIds: state.questionsIds,
+        currentIndex: state.currentIndex,
+        answers: compressedAnswers,
+        timestamp: state.timestamp,
+      };
+
+      const json = JSON.stringify(compressedState);
+
+      // Check size before saving (localStorage typically ~5-10MB, cap at 100KB for safety)
+      if (json.length > 100 * 1024) {
+        console.warn(
+          "Training state too large, only saving index and question IDs",
+        );
+        const minimalState = {
+          questionsIds: state.questionsIds,
+          currentIndex: state.currentIndex,
+          answers: {},
+          timestamp: state.timestamp,
+        };
+        localStorage.setItem("_trainingState", JSON.stringify(minimalState));
+      } else {
+        localStorage.setItem("_trainingState", json);
+      }
+    } catch (error) {
+      if (error instanceof Error && error.name === "QuotaExceededError") {
+        try {
+          // Fallback: save only progress, not answers
+          const minimalState = {
+            questionsIds: state.questionsIds,
+            currentIndex: state.currentIndex,
+            answers: {},
+            timestamp: state.timestamp,
+          };
+          localStorage.setItem("_trainingState", JSON.stringify(minimalState));
+        } catch {
+          console.error("Failed to save training state");
+        }
+      }
+    }
+  },
+
+  getTrainingState: () => {
+    const stored = localStorage.getItem("_trainingState");
+    if (!stored) return null;
+    try {
+      const parsed = JSON.parse(stored);
+
+      // Decompress answers
+      if (parsed.answers) {
+        const decompressedAnswers: Record<string, unknown> = {};
+        Object.entries(parsed.answers).forEach(([key, value]) => {
+          if (typeof value === "string") {
+            try {
+              decompressedAnswers[key] = JSON.parse(value);
+            } catch {
+              decompressedAnswers[key] = value;
+            }
+          } else {
+            decompressedAnswers[key] = value;
+          }
         });
-    });
+        parsed.answers = decompressedAnswers;
+      }
 
-    return Array.from(topicMap.entries()).map(
-      ([topic, { total, correct }]) => ({
-        topic,
-        total,
-        correct,
-        percentage: total > 0 ? Math.round((correct / total) * 100) : 0,
-      }),
-    );
+      return parsed;
+    } catch {
+      return null;
+    }
+  },
+
+  clearTrainingState: () => {
+    localStorage.removeItem("_trainingState");
   },
 };

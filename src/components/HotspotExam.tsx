@@ -149,7 +149,7 @@ export const HotspotExam: React.FC<HotspotExamProps> = ({
         <p className="text-sm font-semibold text-gray-300">
           Areas: {selected.length} selected
         </p>
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           {areas.map((area) => {
             const isSelected = selected.includes(area.id);
 

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { storageUtils } from "../utils/storage";
 import { Question } from "../types";
+import { FormattedText } from "./FormattedText";
 
 interface ReviewModeProps {
   onBack: () => void;
@@ -102,18 +103,19 @@ export const ReviewMode: React.FC<ReviewModeProps> = ({ onBack }) => {
         <div className="glass-panel p-8 mb-8">
           <div className="mb-6">
             <div className="flex gap-2 mb-4">
-              <span className="px-3 py-1 rounded-full text-xs font-semibold bg-cyan-900/40 text-cyan-100 border border-cyan-800/60">
+              <span className="px-3 py-1 rounded-full text-xs font-semibold bg-slate-800/70 text-slate-100 border border-slate-600/70">
                 {currentQuestion.type}
               </span>
               {currentQuestion.category && (
-                <span className="px-3 py-1 rounded-full text-xs font-semibold bg-emerald-900/40 text-emerald-100 border border-emerald-800/60">
+                <span className="px-3 py-1 rounded-full text-xs font-semibold bg-slate-800/70 text-slate-100 border border-slate-600/70">
                   {currentQuestion.category}
                 </span>
               )}
             </div>
-            <h2 className="text-2xl font-bold leading-tight mb-4">
-              {currentQuestion.question}
-            </h2>
+            <FormattedText
+              text={currentQuestion.question}
+              className="text-2xl font-bold leading-tight mb-4 space-y-2"
+            />
           </div>
 
           {/* Opciones */}
@@ -131,15 +133,16 @@ export const ReviewMode: React.FC<ReviewModeProps> = ({ onBack }) => {
                       key={option.id}
                       className={`p-4 border-2 rounded-lg ${
                         isCorrect
-                          ? "border-emerald-600 bg-emerald-900 bg-opacity-20"
-                          : "border-gray-700 bg-gray-800"
+                          ? "border-teal-500/50 bg-teal-900/20"
+                          : "border-slate-700 bg-slate-900/45"
                       }`}
                     >
                       <div className="flex items-center gap-3">
-                        {isCorrect && (
-                          <span className="text-emerald-400">✓</span>
-                        )}
-                        <span>{option.text}</span>
+                        {isCorrect && <span className="text-teal-300">✓</span>}
+                        <FormattedText
+                          text={option.text}
+                          className="text-sm space-y-1"
+                        />
                       </div>
                     </div>
                   );
@@ -164,7 +167,12 @@ export const ReviewMode: React.FC<ReviewModeProps> = ({ onBack }) => {
                         key={statement.id}
                         className="border-t border-slate-700/60"
                       >
-                        <td className="p-3">{statement.text}</td>
+                        <td className="p-3">
+                          <FormattedText
+                            text={statement.text}
+                            className="text-sm space-y-1"
+                          />
+                        </td>
                         <td className="p-3 text-center">
                           {statement.correct === "true" ? "✓" : ""}
                         </td>
@@ -185,13 +193,15 @@ export const ReviewMode: React.FC<ReviewModeProps> = ({ onBack }) => {
               {currentQuestion.steps.map((step, index) => (
                 <div
                   key={step.id}
-                  className="p-4 border-2 border-emerald-600 bg-emerald-900 bg-opacity-20 rounded-lg"
+                  className="p-4 border-2 border-teal-500/50 bg-teal-900/20 rounded-lg"
                 >
                   <div className="flex items-center gap-3">
-                    <span className="text-lg font-bold text-emerald-400">
+                    <span className="text-lg font-bold text-teal-300">
                       {index + 1}
                     </span>
-                    <span>{step.text}</span>
+                    <span className="whitespace-pre-wrap break-words">
+                      {step.text}
+                    </span>
                   </div>
                 </div>
               ))}
@@ -223,10 +233,12 @@ export const ReviewMode: React.FC<ReviewModeProps> = ({ onBack }) => {
                       return (
                         <div
                           key={bucket.id}
-                          className="p-3 bg-gray-800 rounded flex justify-between text-sm"
+                          className="p-3 bg-slate-900/45 rounded flex justify-between text-sm"
                         >
-                          <span>{bucket.label}</span>
-                          <span className="text-emerald-300 font-semibold">
+                          <span className="whitespace-pre-wrap break-words">
+                            {bucket.label}
+                          </span>
+                          <span className="text-teal-300 font-semibold">
                             {matched?.text || "-"}
                           </span>
                         </div>
@@ -239,13 +251,16 @@ export const ReviewMode: React.FC<ReviewModeProps> = ({ onBack }) => {
 
           {/* Explicación */}
           {currentQuestion.explanation && (
-            <div className="bg-blue-900 bg-opacity-20 border border-blue-600 rounded-lg p-4">
-              <p className="text-sm text-gray-200">
-                <span className="font-semibold text-blue-400">
+            <div className="bg-slate-900/45 border border-slate-600 rounded-lg p-4">
+              <div className="text-sm text-slate-200">
+                <span className="font-semibold text-teal-300">
                   💡 Explicación:
                 </span>{" "}
-                {currentQuestion.explanation}
-              </p>
+                <FormattedText
+                  text={currentQuestion.explanation}
+                  className="mt-2 text-sm text-slate-200 space-y-2"
+                />
+              </div>
             </div>
           )}
         </div>
@@ -255,7 +270,7 @@ export const ReviewMode: React.FC<ReviewModeProps> = ({ onBack }) => {
           <button
             onClick={handlePrevious}
             disabled={currentIndex === 0}
-            className="px-6 py-2 border border-gray-700 rounded-lg hover:bg-gray-900 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            className="btn-ghost px-6 py-2 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             ← Anterior
           </button>
@@ -277,7 +292,7 @@ export const ReviewMode: React.FC<ReviewModeProps> = ({ onBack }) => {
         {/* Botón para limpiar todo */}
         <button
           onClick={handleClearAll}
-          className="btn-ghost w-full border border-rose-500/50 text-rose-200 hover:bg-rose-900/20"
+          className="btn-ghost w-full border border-amber-500/40 text-amber-200 hover:bg-amber-900/20"
         >
           Limpiar todas las preguntas falladas
         </button>

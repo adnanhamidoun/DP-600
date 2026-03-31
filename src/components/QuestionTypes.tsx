@@ -53,16 +53,16 @@ export const OrderingQuestion: React.FC<OrderingQuestionProps> = ({
           onDragStart={() => handleDragStart(index)}
           onDragOver={(e) => handleDragOver(e, index)}
           onDragEnd={handleDragEnd}
-          className="p-4 border-2 border-gray-700 rounded-lg bg-gray-800 cursor-move hover:border-gray-600 transition-colors"
+          className="p-3 sm:p-4 border border-slate-700 rounded-xl bg-slate-900/45 cursor-move hover:border-slate-500 transition-colors"
         >
           <div className="flex items-center gap-3">
-            <span className="text-lg font-bold text-blue-400">{index + 1}</span>
+            <span className="text-lg font-bold text-teal-300">{index + 1}</span>
             <span>{step.text}</span>
           </div>
         </div>
       ))}
-      <p className="text-xs text-gray-400 mt-4">
-        💡 Arrastra para reordenar los pasos
+      <p className="text-xs subtle-text mt-4">
+        Arrastra para reordenar los pasos.
       </p>
     </div>
   );
@@ -75,6 +75,7 @@ interface DragDropQuestionProps {
   onChange: (assignments: Record<string, string>) => void;
   currentAnswer?: Record<string, string>;
   template?: string;
+  readOnly?: boolean;
 }
 
 export const DragDropQuestion: React.FC<DragDropQuestionProps> = ({
@@ -83,6 +84,7 @@ export const DragDropQuestion: React.FC<DragDropQuestionProps> = ({
   onChange,
   currentAnswer,
   template,
+  readOnly = false,
 }) => {
   const [assignments, setAssignments] = useState<Record<string, string>>(
     currentAnswer || {},
@@ -94,10 +96,12 @@ export const DragDropQuestion: React.FC<DragDropQuestionProps> = ({
   }, [currentAnswer]);
 
   const handleDragStart = (itemId: string) => {
+    if (readOnly) return;
     setDraggedItem(itemId);
   };
 
   const handleDragOver = (e: React.DragEvent) => {
+    if (readOnly) return;
     e.preventDefault();
   };
 
@@ -117,12 +121,14 @@ export const DragDropQuestion: React.FC<DragDropQuestionProps> = ({
   };
 
   const handleDropOnBucket = (bucketId: string) => {
+    if (readOnly) return;
     if (!draggedItem) return;
     assignItemToBucket(draggedItem, bucketId);
     setDraggedItem(null);
   };
 
   const handleDropOnPool = () => {
+    if (readOnly) return;
     if (!draggedItem) return;
     const newAssignments = { ...assignments };
     delete newAssignments[draggedItem];
@@ -140,13 +146,15 @@ export const DragDropQuestion: React.FC<DragDropQuestionProps> = ({
         key={bucketId}
         onDragOver={handleDragOver}
         onDrop={() => handleDropOnBucket(bucketId)}
-        className="inline-flex min-w-32 min-h-10 px-2 py-1 border-2 border-dashed border-cyan-500 rounded bg-slate-900/60 align-middle"
+        className="inline-flex min-w-24 sm:min-w-32 min-h-10 px-2 py-1 border-2 border-dashed border-teal-500/70 rounded bg-slate-900/70 align-middle"
       >
         {assignedItem ? (
           <span
-            draggable
+            draggable={!readOnly}
             onDragStart={() => handleDragStart(assignedItem.id)}
-            className="w-full text-center px-2 py-1 bg-cyan-700 text-white rounded cursor-move"
+            className={`w-full text-center px-2 py-1 bg-teal-700 text-white rounded ${
+              readOnly ? "cursor-default" : "cursor-move"
+            }`}
           >
             {assignedItem.text}
           </span>
@@ -183,7 +191,7 @@ export const DragDropQuestion: React.FC<DragDropQuestionProps> = ({
     }
 
     return (
-      <pre className="whitespace-pre-wrap font-mono text-base leading-8 bg-slate-900/35 border border-slate-700 rounded-lg p-4 overflow-x-auto">
+      <pre className="whitespace-pre-wrap font-mono text-sm sm:text-base leading-7 sm:leading-8 bg-slate-900/55 border border-slate-700 rounded-lg p-3 sm:p-4 overflow-x-auto">
         {parts}
       </pre>
     );
@@ -195,7 +203,7 @@ export const DragDropQuestion: React.FC<DragDropQuestionProps> = ({
     <div className="space-y-4">
       {template ? (
         <div className="space-y-3">
-          <div className="grid grid-cols-3 gap-4 text-sm font-semibold text-slate-300">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-4 text-xs sm:text-sm font-semibold text-slate-300">
             <div>Values</div>
             <div className="col-span-2">Answer Area</div>
           </div>
@@ -203,15 +211,19 @@ export const DragDropQuestion: React.FC<DragDropQuestionProps> = ({
             <div
               onDragOver={handleDragOver}
               onDrop={handleDropOnPool}
-              className="p-3 border border-slate-700 rounded-lg bg-slate-900/35 min-h-40"
+              className="p-3 border border-slate-700 rounded-lg bg-slate-900/55 min-h-40"
             >
               <div className="space-y-2">
                 {availableItems.map((item) => (
                   <div
                     key={item.id}
-                    draggable
+                    draggable={!readOnly}
                     onDragStart={() => handleDragStart(item.id)}
-                    className="px-3 py-2 bg-cyan-700 text-white rounded cursor-move hover:bg-cyan-600"
+                    className={`px-3 py-2 bg-teal-700 text-white rounded ${
+                      readOnly
+                        ? "cursor-default"
+                        : "cursor-move hover:bg-teal-600"
+                    }`}
                   >
                     {item.text}
                   </div>
@@ -231,9 +243,9 @@ export const DragDropQuestion: React.FC<DragDropQuestionProps> = ({
               key={bucket.id}
               onDragOver={handleDragOver}
               onDrop={() => handleDropOnBucket(bucket.id)}
-              className="min-h-32 border-2 border-dashed border-gray-600 rounded-lg p-4 bg-gray-800 bg-opacity-50"
+              className="min-h-32 border-2 border-dashed border-slate-600 rounded-lg p-4 bg-slate-900/45"
             >
-              <p className="text-sm font-semibold text-gray-300 mb-3">
+              <p className="text-sm font-semibold text-slate-200 mb-3">
                 {bucket.label}
               </p>
               <div className="space-y-2">
@@ -242,9 +254,13 @@ export const DragDropQuestion: React.FC<DragDropQuestionProps> = ({
                   .map((item) => (
                     <div
                       key={item.id}
-                      draggable
+                      draggable={!readOnly}
                       onDragStart={() => handleDragStart(item.id)}
-                      className="p-3 bg-blue-600 text-white rounded cursor-move hover:bg-blue-700"
+                      className={`p-3 bg-teal-700 text-white rounded ${
+                        readOnly
+                          ? "cursor-default"
+                          : "cursor-move hover:bg-teal-600"
+                      }`}
                     >
                       {item.text}
                     </div>
@@ -256,17 +272,19 @@ export const DragDropQuestion: React.FC<DragDropQuestionProps> = ({
       )}
 
       {!template && (
-        <div className="p-4 border border-gray-700 rounded-lg bg-gray-900">
-          <p className="text-sm font-semibold text-gray-300 mb-3">
+        <div className="p-4 border border-slate-700 rounded-lg bg-slate-900/70">
+          <p className="text-sm font-semibold text-slate-200 mb-3">
             Elementos disponibles
           </p>
           <div className="flex flex-wrap gap-2">
             {availableItems.map((item) => (
               <div
                 key={item.id}
-                draggable
+                draggable={!readOnly}
                 onDragStart={() => handleDragStart(item.id)}
-                className="px-4 py-2 bg-gray-800 border border-gray-600 rounded cursor-move hover:bg-gray-700 text-gray-200"
+                className={`px-4 py-2 bg-slate-800 border border-slate-600 rounded text-slate-200 ${
+                  readOnly ? "cursor-default" : "cursor-move hover:bg-slate-700"
+                }`}
               >
                 {item.text}
               </div>
@@ -275,9 +293,11 @@ export const DragDropQuestion: React.FC<DragDropQuestionProps> = ({
         </div>
       )}
 
-      <p className="text-xs text-gray-400">
-        💡 Arrastra los elementos hacia los contenedores correctos
-      </p>
+      {!readOnly && (
+        <p className="text-xs subtle-text">
+          Arrastra los elementos hacia los contenedores correctos.
+        </p>
+      )}
     </div>
   );
 };

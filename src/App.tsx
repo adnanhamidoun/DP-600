@@ -1,44 +1,279 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Dashboard } from "./components/Dashboard";
 import { ExamEngine, ExamResults } from "./components/ExamEngine";
 import { ReviewMode } from "./components/ReviewMode";
 import { QuestionsBuilder } from "./components/QuestionsBuilder";
+import { ExamBuilder, ExamBuildOptions } from "./components/ExamBuilder";
+import { TrainingBuilder } from "./components/TrainingBuilder";
+import { TrainingResumeModal } from "./components/TrainingResumeModal";
 import { ToastProvider } from "./components/Toast";
 import { storageUtils } from "./utils/storage";
-import { examQuestions } from "./data/questions";
+import { Question } from "./types";
 import "./index.css";
 
-type AppView = "dashboard" | "exam" | "results" | "review" | "builder";
-type ExamMode = "normal" | "training";
+type AppView =
+  | "dashboard"
+  | "exam"
+  | "results"
+  | "review"
+  | "builder"
+  | "examBuilder"
+  | "trainingBuilder";
+type ExamMode = "normal" | "training" | "microsoft";
 
 function App() {
   const [view, setView] = useState<AppView>("dashboard");
   const [examResults, setExamResults] = useState<ExamResults | null>(null);
   const [examMode, setExamMode] = useState<ExamMode>("normal");
+  const [selectedQuestions, setSelectedQuestions] = useState<any[]>([]);
+  const [examBuildOptions, setExamBuildOptions] = useState<ExamBuildOptions>({
+    shuffleQuestions: true,
+    shuffleOptions: true,
+  });
+  const [showTrainingResumeModal, setShowTrainingResumeModal] = useState(false);
+  const [trainingState, setTrainingState] = useState<any>(null);
+  const [questionBank, setQuestionBank] = useState<Question[]>([]);
+  const [isQuestionBankLoading, setIsQuestionBankLoading] = useState(true);
+  const [questionBankError, setQuestionBankError] = useState<string | null>(
+    null,
+  );
 
-  const handleStartExam = (mode: ExamMode = "normal") => {
-    setExamMode(mode);
+  const shuffleArray = <T,>(list: T[]): T[] => {
+    const copy = [...list];
+    for (let i = copy.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [copy[i], copy[j]] = [copy[j], copy[i]];
+    }
+    return copy;
+  };
+
+  const pickRandomItem = <T,>(list: T[]): T | null => {
+    if (list.length === 0) return null;
+    const index = Math.floor(Math.random() * list.length);
+    return list[index];
+  };
+
+  // Remove legacy seeded scenario that used to be auto-created.
+  useEffect(() => {
+    const loadQuestionBank = async () => {
+      try {
+        setIsQuestionBankLoading(true);
+        setQuestionBankError(null);
+
+        const response = await fetch("/questions-final.json", {
+          cache: "no-cache",
+        });
+
+        if (!response.ok) {
+          throw new Error(`No se pudo cargar la batería (${response.status})`);
+        }
+
+        const loadedQuestions = (await response.json()) as Question[];
+
+        if (!Array.isArray(loadedQuestions) || loadedQuestions.length === 0) {
+          throw new Error("La batería de preguntas está vacía o es inválida");
+        }
+
+        setQuestionBank(loadedQuestions);
+      } catch (error) {
+        console.error("Error loading question bank:", error);
+        setQuestionBankError(
+          "No se pudo cargar la batería final de preguntas.",
+        );
+      } finally {
+        setIsQuestionBankLoading(false);
+      }
+    };
+
+    loadQuestionBank();
+
+    const legacyScenarioId = "scn-pyspark-analysis";
+    const existingScenarios = storageUtils.getScenarios();
+    const hasLegacyScenario = existingScenarios.some(
+      (scenario) => scenario.id === legacyScenarioId,
+    );
+
+    if (!hasLegacyScenario) {
+      return;
+    }
+
+    const hasLinkedQuestions = storageUtils
+      .getCustomQuestions()
+      .some((question) => question.scenarioId === legacyScenarioId);
+
+    if (!hasLinkedQuestions) {
+      storageUtils.deleteScenario(legacyScenarioId);
+    }
+
+    // Legacy cleanup: failed-history is no longer used for retry flows.
+    storageUtils.clearFailedQuestions();
+  }, []);
+
+  const handleBuildCustomExam = () => {
+    setView("examBuilder");
+  };
+
+  const buildMicrosoftStressExam = (pool: Question[]): Question[] => {
+    const targetCount = 40 + Math.floor(Math.random() * 21); // 40-60
+    const usedIds = new Set<string>();
+    const finalQuestions: Question[] = [];
+
+    const caseStudyIds = Array.from(
+      new Set(pool.map((q) => q.caseStudyId).filter(Boolean)),
+    ) as string[];
+    const selectedCaseStudyId = pickRandomItem(caseStudyIds);
+    const caseStudyBlock = selectedCaseStudyId
+      ? pool.filter((q) => q.caseStudyId === selectedCaseStudyId).slice(0, 7)
+      : [];
+
+    caseStudyBlock.forEach((q) => {
+      if (!usedIds.has(q.id)) {
+        finalQuestions.push(q);
+        usedIds.add(q.id);
+      }
+    });
+
+    const scenarioIds = Array.from(
+      new Set(
+        pool
+          .filter((q) => !usedIds.has(q.id))
+          .map((q) => q.scenarioId)
+          .filter(Boolean),
+      ),
+    ) as string[];
+    const selectedScenarioId = pickRandomItem(scenarioIds);
+    const scenarioBlock = selectedScenarioId
+      ? pool
+          .filter(
+            (q) => q.scenarioId === selectedScenarioId && !usedIds.has(q.id),
+          )
+          .slice(0, 3)
+      : [];
+
+    scenarioBlock.forEach((q) => {
+      if (!usedIds.has(q.id)) {
+        finalQuestions.push(q);
+        usedIds.add(q.id);
+      }
+    });
+
+    const normalPool = pool.filter(
+      (q) => !q.caseStudyId && !q.scenarioId && !usedIds.has(q.id),
+    );
+    const shuffledNormals = shuffleArray(normalPool);
+    const remainingNeeded = Math.max(0, targetCount - finalQuestions.length);
+    shuffledNormals.slice(0, remainingNeeded).forEach((q) => {
+      if (!usedIds.has(q.id)) {
+        finalQuestions.push(q);
+        usedIds.add(q.id);
+      }
+    });
+
+    return finalQuestions;
+  };
+
+  const handleStartMicrosoftExam = () => {
+    const microsoftQuestions = buildMicrosoftStressExam(allQuestions);
+
+    if (microsoftQuestions.length === 0) {
+      window.alert(
+        "No hay preguntas disponibles para iniciar el examen Microsoft.",
+      );
+      return;
+    }
+
+    if (microsoftQuestions.length < 40) {
+      window.alert(
+        `El banco actual no alcanza 40 preguntas normales. Se iniciara con ${microsoftQuestions.length} preguntas.`,
+      );
+    }
+
+    setSelectedQuestions(microsoftQuestions);
+    setExamBuildOptions({
+      shuffleQuestions: false,
+      shuffleOptions: true,
+    });
+    setExamMode("microsoft");
+    setView("exam");
+  };
+
+  const handleStartTraining = () => {
+    if (allQuestions.length === 0) {
+      window.alert("No hay preguntas disponibles para el entrenamiento.");
+      return;
+    }
+
+    // Check for saved training state
+    const savedState = storageUtils.getTrainingState();
+    if (
+      savedState &&
+      savedState.questionsIds &&
+      savedState.questionsIds.length > 0
+    ) {
+      setTrainingState(savedState);
+      setShowTrainingResumeModal(true);
+      setView("trainingBuilder");
+    } else {
+      // Go to training builder to configure
+      setView("trainingBuilder");
+    }
+  };
+
+  const handleStartTrainingWithConfig = (
+    questions: Question[],
+    shuffle: boolean,
+  ) => {
+    setSelectedQuestions(questions);
+    setExamBuildOptions({
+      shuffleQuestions: shuffle,
+      shuffleOptions: true,
+    });
+    setExamMode("training");
+    setShowTrainingResumeModal(false);
+    setTrainingState(null);
+    storageUtils.clearTrainingState();
+    setView("exam");
+  };
+
+  const _resumeTraining = () => {
+    if (!trainingState || !trainingState.questionsIds) return;
+
+    // Reconstruct questions from saved IDs
+    const savedIds = trainingState.questionsIds;
+    const reconstructed = savedIds
+      .map((id: string) =>
+        allQuestions.find(
+          (q) => q.id === id || q.id === `q-${id}` || id.includes(q.id),
+        ),
+      )
+      .filter((q: Question | undefined) => q !== undefined) as Question[];
+
+    setSelectedQuestions(
+      reconstructed.length > 0 ? reconstructed : allQuestions,
+    );
+    setExamBuildOptions({
+      shuffleQuestions: false,
+      shuffleOptions: false,
+    });
+    setExamMode("training");
+    setShowTrainingResumeModal(false);
+    setView("exam");
+  };
+
+  const handleBuildExam = (questions: any[], options: ExamBuildOptions) => {
+    setSelectedQuestions(questions);
+    setExamBuildOptions(options);
+    setExamMode("normal");
     setView("exam");
   };
 
   const handleExamComplete = (results: ExamResults) => {
     setExamResults(results);
 
-    // Guardar sesión
-    const session = {
-      sessionId: Date.now().toString(),
-      startDate: new Date().toISOString(),
-      totalQuestions: results.totalQuestions,
-      correctAnswers: results.correctAnswers,
-      failedQuestions: results.failedQuestions,
-      answers: results.answers,
-    };
-    storageUtils.addSession(session);
-
-    // Guardar preguntas falladas
-    results.failedQuestions.forEach((question) => {
-      storageUtils.addFailedQuestion(question);
-    });
+    // Clear training state if in training mode
+    if (examMode === "training") {
+      storageUtils.clearTrainingState();
+    }
 
     setView("results");
   };
@@ -46,11 +281,51 @@ function App() {
   const handleCancelExam = () => {
     if (window.confirm("¿Estás seguro de que deseas cancelar el examen?")) {
       setView("dashboard");
+      setSelectedQuestions([]);
     }
   };
 
   const handleReviewFailed = () => {
-    setView("review");
+    const failedQuestions = examResults?.failedQuestions || [];
+    const uniqueFailedQuestions = failedQuestions.filter(
+      (question, index, arr) =>
+        arr.findIndex((q) => q.id === question.id) === index,
+    );
+
+    if (uniqueFailedQuestions.length === 0) {
+      window.alert("No hay preguntas falladas para reintentar.");
+      return;
+    }
+
+    setSelectedQuestions(uniqueFailedQuestions);
+    setExamBuildOptions({
+      shuffleQuestions: true,
+      shuffleOptions: true,
+    });
+    setExamMode("training");
+    storageUtils.clearTrainingState();
+    setView("exam");
+  };
+
+  const handleTrainFailedQuestions = () => {
+    const failedQuestions = examResults?.failedQuestions || [];
+    const uniqueFailedQuestions = failedQuestions.filter(
+      (question, index, arr) =>
+        arr.findIndex((q) => q.id === question.id) === index,
+    );
+    if (uniqueFailedQuestions.length === 0) {
+      window.alert("No hay preguntas falladas para entrenar.");
+      return;
+    }
+
+    setSelectedQuestions(uniqueFailedQuestions);
+    setExamBuildOptions({
+      shuffleQuestions: true,
+      shuffleOptions: true,
+    });
+    setExamMode("training");
+    storageUtils.clearTrainingState();
+    setView("exam");
   };
 
   const handleBuildQuestions = () => {
@@ -59,44 +334,170 @@ function App() {
 
   const handleBackToDashboard = () => {
     setView("dashboard");
+    setSelectedQuestions([]);
   };
 
-  // Combinar preguntas: predefinidas + personalizadas
-  const customQuestions = storageUtils.getCustomQuestions();
-  const allQuestions = [...examQuestions, ...customQuestions];
+  // Banco fijo final del proyecto (backup-1774714216013)
+  const allQuestions = questionBank;
+  const questionsToUse =
+    selectedQuestions.length > 0 ? selectedQuestions : allQuestions;
+
+  if (isQuestionBankLoading) {
+    return (
+      <ToastProvider>
+        <div className="app-shell flex items-center justify-center p-6">
+          <div className="glass-panel p-6 sm:p-8 text-center max-w-lg w-full">
+            <h1 className="text-2xl font-semibold mb-2">Cargando batería</h1>
+            <p className="subtle-text mb-4">
+              Preparando preguntas para iniciar el simulador...
+            </p>
+            <div className="progress-track h-2">
+              <div className="progress-fill h-2 w-2/3 animate-pulse" />
+            </div>
+          </div>
+        </div>
+      </ToastProvider>
+    );
+  }
+
+  if (questionBankError) {
+    return (
+      <ToastProvider>
+        <div className="app-shell flex items-center justify-center p-6">
+          <div className="glass-panel p-6 sm:p-8 text-center max-w-lg w-full">
+            <h1 className="text-2xl font-semibold mb-2 text-rose-300">
+              Error cargando preguntas
+            </h1>
+            <p className="subtle-text mb-5">{questionBankError}</p>
+            <button
+              onClick={() => window.location.reload()}
+              className="btn-primary"
+            >
+              Reintentar
+            </button>
+          </div>
+        </div>
+      </ToastProvider>
+    );
+  }
 
   return (
     <ToastProvider>
       <>
         {view === "dashboard" && (
           <Dashboard
-            onStartExam={handleStartExam}
-            onReviewFailed={handleReviewFailed}
             onBuildQuestions={handleBuildQuestions}
+            onBuildCustomExam={handleBuildCustomExam}
+            onStartMicrosoftExam={handleStartMicrosoftExam}
+            onStartTraining={handleStartTraining}
           />
         )}
 
-        {view === "exam" && (
-          <ExamEngine
+        {view === "examBuilder" && (
+          <ExamBuilder
             questions={allQuestions}
-            mode={examMode}
-            onComplete={handleExamComplete}
-            onCancel={handleCancelExam}
+            scenarios={storageUtils.getScenarios()}
+            onBuildExam={handleBuildExam}
+            onCancel={handleBackToDashboard}
           />
+        )}
+
+        {view === "trainingBuilder" && (
+          <>
+            {showTrainingResumeModal && trainingState && (
+              <TrainingResumeModal
+                sessionTime={new Date(trainingState.timestamp).toLocaleString()}
+                questions={trainingState.questionsIds?.length || 0}
+                progress={Math.round(
+                  ((trainingState.currentIndex || 0) /
+                    (trainingState.questionsIds?.length || 1)) *
+                    100,
+                )}
+                onResume={_resumeTraining}
+                onNew={() => {
+                  setShowTrainingResumeModal(false);
+                  setTrainingState(null);
+                  storageUtils.clearTrainingState();
+                }}
+              />
+            )}
+            {!showTrainingResumeModal && (
+              <TrainingBuilder
+                questions={allQuestions}
+                onStartTraining={handleStartTrainingWithConfig}
+                onCancel={handleBackToDashboard}
+              />
+            )}
+          </>
+        )}
+
+        {view === "exam" && (
+          <>
+            {showTrainingResumeModal && trainingState && (
+              <TrainingResumeModal
+                sessionTime={new Date(trainingState.timestamp).toLocaleString()}
+                questions={trainingState.questionsIds?.length || 0}
+                progress={Math.round(
+                  ((trainingState.currentIndex || 0) /
+                    (trainingState.questionsIds?.length || 1)) *
+                    100,
+                )}
+                onResume={_resumeTraining}
+                onNew={() => {
+                  setShowTrainingResumeModal(false);
+                  setTrainingState(null);
+                  storageUtils.clearTrainingState();
+                }}
+              />
+            )}
+            <ExamEngine
+              questions={questionsToUse}
+              scenarios={storageUtils.getScenarios()}
+              mode={examMode}
+              shuffleQuestions={examBuildOptions.shuffleQuestions}
+              shuffleOptions={examBuildOptions.shuffleOptions}
+              initialIndex={trainingState?.currentIndex || 0}
+              initialAnswers={trainingState?.answers || {}}
+              onComplete={handleExamComplete}
+              onCancel={handleCancelExam}
+            />
+          </>
         )}
 
         {view === "results" && examResults && (
           <div className="app-shell">
             <div className="app-container max-w-4xl text-center">
               <p className="subtle-text mb-2 text-sm uppercase tracking-[0.18em]">
-                Resultado
+                {examMode === "training"
+                  ? "Resultado de Entrenamiento"
+                  : "Resultado"}
               </p>
-              <h1 className="text-4xl font-semibold mb-4">Examen completado</h1>
-              <div className="glass-panel p-8 sm:p-12 mb-6">
-                <div className="text-6xl font-semibold text-cyan-300 mb-4">
-                  {examResults.score}%
-                </div>
-                <p className="text-xl subtle-text mb-5">
+              <h1 className="text-2xl sm:text-3xl lg:text-4xl font-semibold mb-4">
+                {examMode === "training"
+                  ? "Sesión de entrenamiento completada"
+                  : "Examen completado"}
+              </h1>
+              <div className="glass-panel p-4 sm:p-8 lg:p-12 mb-6">
+                {examMode === "training" ? (
+                  <>
+                    <div className="text-4xl sm:text-5xl font-semibold text-teal-300 mb-2">
+                      {examResults.score}%
+                    </div>
+                    <p className="subtle-text text-sm mb-4">
+                      Porcentaje de acierto
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <div className="text-4xl sm:text-5xl lg:text-6xl font-semibold text-teal-300 mb-2">
+                      {examResults.scaledScore}
+                    </div>
+                    <p className="subtle-text text-sm mb-4">
+                      Escala Microsoft (0-1000)
+                    </p>
+                  </>
+                )}
+                <p className="text-base sm:text-xl subtle-text mb-5">
                   Respuestas correctas: {examResults.correctAnswers} /{" "}
                   {examResults.totalQuestions}
                 </p>
@@ -104,38 +505,116 @@ function App() {
                   Puntuacion ponderada: {examResults.earnedPoints.toFixed(2)} /{" "}
                   {examResults.totalPoints}
                 </p>
+                {examMode !== "training" && (
+                  <>
+                    <p className="text-sm subtle-text mb-3">
+                      Porcentaje total: {examResults.score}%
+                    </p>
+                    <p className="text-sm subtle-text mb-1">
+                      Puntuacion minima para aprobar: 700
+                    </p>
+                  </>
+                )}
                 {examResults.failedQuestions.length > 0 && (
-                  <p className="text-lg text-amber-300">
+                  <p className="text-lg text-amber-200 mt-3">
                     Preguntas falladas: {examResults.failedQuestions.length}
                   </p>
                 )}
               </div>
 
-              {examResults.score >= 70 ? (
-                <div className="glass-panel border-emerald-400/30 p-5 mb-6">
-                  <p className="text-lg text-emerald-200">
-                    Felicidades, has superado el examen.
-                  </p>
-                </div>
-              ) : (
-                <div className="glass-panel border-rose-400/30 p-5 mb-6">
-                  <p className="text-lg text-rose-200">
-                    Te recomendamos revisar las preguntas falladas.
-                  </p>
-                </div>
-              )}
+              {examMode !== "training" &&
+                (examResults.passed ? (
+                  <div className="glass-panel border-teal-400/30 p-5 mb-6">
+                    <p className="text-lg text-teal-100">
+                      Aprobado. Has superado el umbral oficial de 700/1000.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="glass-panel border-amber-400/30 p-5 mb-6">
+                    <p className="text-lg text-amber-100">
+                      No alcanzaste 700/1000. Te recomendamos revisar las
+                      preguntas falladas.
+                    </p>
+                  </div>
+                ))}
 
-              <div className="flex flex-col sm:flex-row gap-3 justify-center">
-                <button onClick={handleBackToDashboard} className="btn-primary">
-                  Volver al dashboard
-                </button>
-                {examResults.failedQuestions.length > 0 && (
-                  <button
-                    onClick={handleReviewFailed}
-                    className="btn-secondary"
-                  >
-                    Revisar falladas
-                  </button>
+              {examMode === "training" &&
+                examResults.failedQuestions.length > 0 && (
+                  <div className="glass-panel border-amber-400/30 p-5 mb-6">
+                    <p className="text-lg text-amber-100 mb-2">
+                      Tienes {examResults.failedQuestions.length} pregunta
+                      {examResults.failedQuestions.length !== 1 ? "s" : ""} para
+                      revisar
+                    </p>
+                    <p className="text-sm text-amber-200">
+                      Practica con estas preguntas para mejorar tu puntuación
+                    </p>
+                  </div>
+                )}
+
+              <div className="glass-panel p-6 mb-6 text-left">
+                <h2 className="text-xl font-semibold mb-4">
+                  Desglose por tipo de pregunta
+                </h2>
+                <div className="space-y-3">
+                  {examResults.breakdownByType
+                    .slice()
+                    .sort((a, b) => b.total - a.total)
+                    .map((item) => (
+                      <div key={item.type}>
+                        <div className="flex justify-between text-sm mb-1">
+                          <span className="capitalize">{item.type}</span>
+                          <span className="subtle-text">
+                            {item.percentage}% ({item.earned.toFixed(2)} /{" "}
+                            {item.total})
+                          </span>
+                        </div>
+                        <div className="progress-track h-2">
+                          <div
+                            className="progress-fill h-2"
+                            style={{ width: `${item.percentage}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-3 justify-center max-w-md mx-auto">
+                {examMode === "training" ? (
+                  <>
+                    <button
+                      onClick={handleBackToDashboard}
+                      className="btn-primary"
+                    >
+                      Volver al dashboard
+                    </button>
+                    {examResults.failedQuestions.length > 0 && (
+                      <button
+                        onClick={handleTrainFailedQuestions}
+                        className="btn-secondary"
+                      >
+                        Entrenar solo fallidas
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <button
+                      onClick={handleBackToDashboard}
+                      className="btn-primary"
+                    >
+                      Volver al dashboard
+                    </button>
+                    {examResults.failedQuestions.length > 0 && (
+                      <button
+                        onClick={handleReviewFailed}
+                        className="btn-secondary"
+                      >
+                        Reintentar falladas (este intento)
+                      </button>
+                    )}
+                  </>
                 )}
               </div>
             </div>
