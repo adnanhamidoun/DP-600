@@ -9,6 +9,7 @@ import { TrainingResumeModal } from "./components/TrainingResumeModal";
 import { ToastProvider } from "./components/Toast";
 import { storageUtils } from "./utils/storage";
 import { Question } from "./types";
+import JSZip from "jszip";
 import "./index.css";
 
 type AppView =
@@ -55,37 +56,89 @@ function App() {
 
   // Remove legacy seeded scenario that used to be auto-created.
   useEffect(() => {
-    const loadQuestionBank = async () => {
+    const loadBackupData = async () => {
       try {
         setIsQuestionBankLoading(true);
         setQuestionBankError(null);
 
-        const response = await fetch("/questions-final.json", {
+        // Load the specific backup file
+        const response = await fetch("/backup-1775084408164.zip", {
           cache: "no-cache",
         });
 
         if (!response.ok) {
-          throw new Error(`No se pudo cargar la batería (${response.status})`);
+          throw new Error(`No se pudo cargar el backup (${response.status})`);
         }
 
-        const loadedQuestions = (await response.json()) as Question[];
+        const arrayBuffer = await response.arrayBuffer();
+        const zip = new JSZip();
+        await zip.loadAsync(arrayBuffer);
 
-        if (!Array.isArray(loadedQuestions) || loadedQuestions.length === 0) {
-          throw new Error("La batería de preguntas está vacía o es inválida");
+        // Extract questions, cases, and scenarios from ZIP
+        const questionsFile = zip.file("questions.json");
+        const casesFile = zip.file("cases.json");
+        const scenariosFile = zip.file("scenarios.json");
+
+        const questionsData = questionsFile
+          ? JSON.parse(await questionsFile.async("text"))
+          : [];
+        const casesData = casesFile
+          ? JSON.parse(await casesFile.async("text"))
+          : [];
+        const scenariosData = scenariosFile
+          ? JSON.parse(await scenariosFile.async("text"))
+          : [];
+
+        // Set questions for display
+        if (Array.isArray(questionsData) && questionsData.length > 0) {
+          setQuestionBank(questionsData);
         }
 
-        setQuestionBank(loadedQuestions);
-      } catch (error) {
-        console.error("Error loading question bank:", error);
-        setQuestionBankError(
-          "No se pudo cargar la batería final de preguntas.",
+        // Import to localStorage (merge mode - doesn't overwrite)
+        storageUtils.importBackupData(
+          Array.isArray(questionsData) ? questionsData : [],
+          Array.isArray(casesData) ? casesData : [],
+          "merge",
         );
+
+        // Import scenarios
+        if (Array.isArray(scenariosData) && scenariosData.length > 0) {
+          const existingScenarios = storageUtils.getScenarios();
+          const allScenarios = [...existingScenarios];
+
+          scenariosData.forEach((scn: any) => {
+            const exists = allScenarios.find((s) => s.id === scn.id);
+            if (!exists) {
+              allScenarios.push(scn);
+            }
+          });
+
+          storageUtils.saveScenarios(allScenarios);
+        }
+      } catch (error) {
+        console.error("Error loading backup data:", error);
+        setQuestionBankError(
+          "No se pudo cargar el archivo de backup. Usando batería por defecto.",
+        );
+        // Fallback: load default questions
+        try {
+          const response = await fetch("/questions-final.json", {
+            cache: "no-cache",
+          });
+          if (response.ok) {
+            const loadedQuestions = await response.json();
+            setQuestionBank(loadedQuestions);
+            storageUtils.importBackupData(loadedQuestions, [], "merge");
+          }
+        } catch (fallbackError) {
+          console.error("Error loading fallback questions:", fallbackError);
+        }
       } finally {
         setIsQuestionBankLoading(false);
       }
     };
 
-    loadQuestionBank();
+    loadBackupData();
 
     const legacyScenarioId = "scn-pyspark-analysis";
     const existingScenarios = storageUtils.getScenarios();
